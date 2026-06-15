@@ -115,6 +115,12 @@ fun SettingsView(
           }
 
           Lists.ItemDivider()
+          Setting.Text(
+              R.string.proton_vpn,
+              subtitle = stringResource(R.string.proton_vpn_subtitle),
+              onClick = settingsNav.onNavigateToProton)
+
+          Lists.ItemDivider()
           Setting.Switch(
               R.string.client_remote_logging_enabled,
               subtitle =
@@ -278,5 +284,5 @@ fun SettingsPreview() {
   vm.tailNetLockEnabled.set(true)
   vm.isAdmin.set(true)
   vm.managedByOrganization.set("Tails and Scales Inc.")
-  SettingsView(SettingsNav({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}), vm)
+  SettingsView(SettingsNav({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}), vm)
 }

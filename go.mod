@@ -3,13 +3,24 @@ module github.com/tailscale/tailscale-android
 go 1.26.4
 
 require (
+	github.com/ProtonMail/go-srp v0.0.7
+	github.com/ProtonVPN/go-vpn-lib v0.0.0-00010101000000-000000000000
+	github.com/gaissmai/bart v0.26.1
 	github.com/tailscale/wireguard-go v0.0.0-20260527010701-b48af7099cad
 	golang.org/x/mobile v0.0.0-20240806205939-81131f6468ab
 	tailscale.com v1.99.0-pre.0.20260603162400-cdcb1cb07b74
 )
 
+// ProtonVPN's Go library is vendored locally alongside this repo. We only use
+// its pure-Go packages (ed25519, localAgent); the cgo wgAndroid package is not
+// imported. Run `go mod tidy` after cloning to populate go.sum (this pulls in
+// github.com/pkg/errors, a transitive dependency of go-vpn-lib/ed25519).
+replace github.com/ProtonVPN/go-vpn-lib => ../proton/go-vpn-lib
+
 require (
 	filippo.io/edwards25519 v1.2.0 // indirect
+	github.com/ProtonMail/bcrypt v0.0.0-20210511135022-227b4adcab57 // indirect
+	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/akutz/memconn v0.1.0 // indirect
 	github.com/alexbrainman/sspi v0.0.0-20231016080023-1a75b4708caa // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.0 // indirect
@@ -26,14 +37,15 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.28.13 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.41.5 // indirect
 	github.com/aws/smithy-go v1.24.0 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/coder/websocket v1.8.12 // indirect
 	github.com/coreos/go-iptables v0.7.1-0.20240112124308-65c67c9f46e6 // indirect
 	github.com/creachadair/msync v0.7.1 // indirect
+	github.com/cronokirby/saferith v0.33.0 // indirect
 	github.com/dblohm7/wingoes v0.0.0-20240119213807-a09d6be7affa // indirect
 	github.com/digitalocean/go-smbios v0.0.0-20180907143718-390a4f403a8e // indirect
 	github.com/djherbis/times v1.6.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
-	github.com/gaissmai/bart v0.26.1 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.1-0.20230522191255-76236955d466 // indirect
@@ -59,6 +71,7 @@ require (
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.25 // indirect
 	github.com/pires/go-proxyproto v0.8.1 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	github.com/safchain/ethtool v0.3.0 // indirect
 	github.com/tailscale/certstore v0.1.1-0.20260409135935-3638fb84b77d // indirect
 	github.com/tailscale/go-winio v0.0.0-20231025203758-c4f33415bf55 // indirect

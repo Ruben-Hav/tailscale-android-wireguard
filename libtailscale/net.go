@@ -126,6 +126,30 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		b.logger.Logf("updateTUN: set nameservers")
 	}
 
+	// ProtonVPN split tunnel: the tailnet "route via Tailscale" set is exactly
+	// the router config's routes (tailnet addrs + subnet routes) before we
+	// inject any default route. Update the demux's table so it can classify
+	// outbound packets.
+	protonMgr.tailnetTable.Store(buildTailnetTable(rcfg.Routes))
+	if d := protonMgr.curDemux.Load(); d != nil {
+		d.setTable(protonMgr.tailnetTable.Load())
+	}
+
+	// When Proton is enabled, capture the full default route so all non-tailnet
+	// traffic enters our TUN (the demux then diverts it to the Proton tunnel).
+	// LocalRoutes (LAN) stay excluded below, exactly as before.
+	routes := rcfg.Routes
+	excluded := rcfg.LocalRoutes
+	protonOn := protonMgr.enabled.Load()
+	if protonOn {
+		routes = append(append([]netip.Prefix{}, rcfg.Routes...), defaultRoute4, defaultRoute6)
+		// Keep LAN / private / link-local / multicast off the Proton tunnel so
+		// it stays on the local network instead of being black-holed.
+		excluded = append(append([]netip.Prefix{}, rcfg.LocalRoutes...), protonExcludedPrefixes...)
+		log.Printf("proton: capturing default route; applying %d routes (useExcludeAPI33+): %v", len(routes), routes)
+		log.Printf("proton: excluding (kept local): %v", excluded)
+	}
+
 	// Decide whether to use ExcludeRoute (API 33+) or compute included prefixes
 	// and pass them to AddRoute (older APIs).
 	useExclude := false
@@ -135,7 +159,7 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 
 	if useExclude {
 		// For API 33+, use ExcludeRoute for LocalRoutes and AddRoute for Routes.
-		for _, route := range rcfg.Routes {
+		for _, route := range routes {
 			// Normalize route address; Builder.addRoute does not accept non-zero masked bits.
 			route = route.Masked()
 			if err := builder.AddRoute(route.Addr().String(), int32(route.Bits())); err != nil {
@@ -143,7 +167,7 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 			}
 		}
 
-		for _, route := range rcfg.LocalRoutes {
+		for _, route := range excluded {
 			addr := route.Addr()
 			if addr.IsLoopback() {
 				continue // Skip the loopback addresses since VpnService throws an exception for those (both IPv4 and IPv6) - see https://android.googlesource.com/platform/frameworks/base/+/c741553/core/java/android/net/VpnService.java#303
@@ -157,7 +181,7 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		b.logger.Logf("updateTUN: added %d routes (exclude-mode), localRoutes=%d", len(rcfg.Routes), len(rcfg.LocalRoutes))
 	} else {
 		// Older APIs: compute allowed-minus-disallowed prefixes and AddRoute them.
-		prefixesV4, prefixesV6, err := rangescalc.Calculate(rcfg.Routes, rcfg.LocalRoutes)
+		prefixesV4, prefixesV6, err := rangescalc.Calculate(routes, excluded)
 		if err != nil {
 			b.logger.Logf("updateTUN: route calculation error: %v", err)
 			return err
@@ -234,8 +258,38 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 	}
 	b.logger.Logf("updateTUN: created TUN device")
 
-	b.devices.add(tunDev)
-	b.logger.Logf("updateTUN: added TUN device")
+	if protonOn && protonMgr.tun != nil {
+		// ProtonVPN split tunnel: interpose the demux between the real Android
+		// TUN and Tailscale's engine. Tailscale (via multiTUN) drives the
+		// demux, which returns only tailnet packets and diverts the rest to the
+		// persistent Proton TUN. The Proton wireguard-go device writes its
+		// decrypted return packets back out via this same real device.
+		ep := &realEndpoint{real: tunDev}
+		demux := newDemuxRouter(ep, protonMgr.tun, protonMgr.tailnetTable.Load(), &protonMgr.ready)
+		protonMgr.tun.setWriter(ep)
+		protonMgr.curDemux.Store(demux)
+		b.devices.add(demux)
+		b.logger.Logf("updateTUN: added Proton split-tunnel demux")
+		log.Printf("proton: split-tunnel demux installed on freshly-established TUN (default route captured)")
+
+		// Build the SNAT mapping (device TUN addr <-> Proton client addr) so
+		// outbound packets carry the source IP the Proton server expects.
+		var tunAddrs []netip.Addr
+		for _, a := range rcfg.LocalAddrs {
+			tunAddrs = append(tunAddrs, a.Addr())
+		}
+		if nat := buildProtonNAT(tunAddrs, protonMgr.protonV4, protonMgr.protonV6); nat != nil {
+			setProtonNAT(nat)
+			log.Printf("proton: NAT enabled tunAddrs=%v protonV4=%v protonV6=%v", tunAddrs, protonMgr.protonV4, protonMgr.protonV6)
+		} else {
+			log.Printf("proton: NAT NOT built (tunAddrs=%v protonV4=%v protonV6=%v); server will likely drop traffic", tunAddrs, protonMgr.protonV4, protonMgr.protonV6)
+		}
+	} else {
+		protonMgr.curDemux.Store(nil)
+		clearProtonNAT()
+		b.devices.add(tunDev)
+		b.logger.Logf("updateTUN: added TUN device")
+	}
 
 	if b.devices.Up() {
 		b.logger.Logf("tunnel brought up")
@@ -277,6 +331,16 @@ func (b *backend) NetworkChanged(ifname string) {
 		b.netMon.InjectEvent()
 	} else {
 		log.Printf("NetworkChanged: netMon is nil")
+	}
+
+	// ProtonVPN: rebind the Proton UDP socket onto the new network (and
+	// re-protect it), and tell the local agent whether the network is up.
+	available := ifname != ""
+	if dev := protonMgr.currentDevice(); dev != nil && available {
+		dev.Rebind()
+	}
+	if ag := protonMgr.currentAgent(); ag != nil {
+		ag.SetConnectivity(available)
 	}
 }
 

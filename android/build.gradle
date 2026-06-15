@@ -86,6 +86,10 @@ android {
         }
         debug {
             manifestPlaceholders.leanbackRequired = false
+            // Install side-by-side with the official Tailscale app: distinct
+            // package id (com.tailscale.ipn.debug) and a distinct launcher name
+            // (see src/debug/res/values/strings.xml).
+            applicationIdSuffix ".debug"
         }
         release {
             manifestPlaceholders.leanbackRequired = false

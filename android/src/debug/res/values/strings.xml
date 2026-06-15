@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Debug-build overrides. Distinct launcher name so the debug build (with the
+     ProtonVPN feature) is distinguishable from an official Tailscale install. -->
+<resources>
+    <string name="app_name" translatable="false">Tailscale Proton</string>
+</resources>

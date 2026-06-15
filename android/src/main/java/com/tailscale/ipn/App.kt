@@ -33,6 +33,7 @@ import com.tailscale.ipn.ui.model.Ipn
 import com.tailscale.ipn.ui.model.Netmap
 import com.tailscale.ipn.ui.notifier.HealthNotifier
 import com.tailscale.ipn.ui.notifier.Notifier
+import com.tailscale.ipn.ui.viewModel.ProtonBridge
 import com.tailscale.ipn.ui.viewModel.AppViewModel
 import com.tailscale.ipn.ui.viewModel.AppViewModelFactory
 import com.tailscale.ipn.util.FeatureFlags
@@ -224,6 +225,9 @@ class App : UninitializedApp(), libtailscale.AppContext, ViewModelStoreOwner {
     Request.setApp(app)
     Notifier.setApp(app)
     Notifier.start(applicationScope)
+    // Register the ProtonVPN status receiver so the Go data plane can push
+    // connection state/errors up to the UI.
+    ProtonBridge.register()
   }
 
   private fun initViewModels() {

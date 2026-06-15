@@ -84,6 +84,8 @@ import com.tailscale.ipn.ui.view.NotificationsView
 import com.tailscale.ipn.ui.view.PeerDetails
 import com.tailscale.ipn.ui.view.PermissionsView
 import com.tailscale.ipn.ui.view.PrimaryActionButton
+import com.tailscale.ipn.ui.view.ProtonCountryPickerView
+import com.tailscale.ipn.ui.view.ProtonView
 import com.tailscale.ipn.ui.view.RunExitNodeView
 import com.tailscale.ipn.ui.view.SearchView
 import com.tailscale.ipn.ui.view.SettingsView
@@ -306,6 +308,7 @@ class MainActivity : ComponentActivity() {
                           onNavigateToSplitTunneling = { navController.navigate("splitTunneling") },
                           onNavigateToTailnetLock = { navController.navigate("tailnetLock") },
                           onNavigateToSubnetRouting = { navController.navigate("subnetRouting") },
+                          onNavigateToProton = { navController.navigate("proton") },
                           onNavigateToMDMSettings = { navController.navigate("mdmSettings") },
                           onNavigateToManagedBy = { navController.navigate("managedBy") },
                           onNavigateToUserSwitcher = { navController.navigate("userSwitcher") },
@@ -375,6 +378,12 @@ class MainActivity : ComponentActivity() {
                   composable("splitTunneling") { SplitTunnelAppPickerView(backTo("settings")) }
                   composable("tailnetLock") { TailnetLockSetupView(backTo("settings")) }
                   composable("subnetRouting") { SubnetRoutingView(backTo("settings")) }
+                  composable("proton") {
+                    ProtonView(
+                        backTo("settings"),
+                        onNavigateToCountries = { navController.navigate("protonCountries") })
+                  }
+                  composable("protonCountries") { ProtonCountryPickerView(backTo("proton")) }
                   composable("about") { AboutView(backTo("settings")) }
                   composable("mdmSettings") { MDMSettingsDebugView(backTo("settings")) }
                   composable("managedBy") { ManagedByView(backTo("settings")) }

@@ -267,6 +267,14 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 			// that independently of userspace engine network changes which may
 			// eliminate some unnecessary work.
 			go b.NetworkChanged(i)
+		case req := <-onProtonConnect:
+			req.reply <- b.protonConnect(req.params)
+		case <-onProtonDisconnect:
+			b.protonDisconnect()
+		case r := <-onProtonReceiver:
+			protonMgr.mu.Lock()
+			protonMgr.receiver = r
+			protonMgr.mu.Unlock()
 		}
 	}
 }
