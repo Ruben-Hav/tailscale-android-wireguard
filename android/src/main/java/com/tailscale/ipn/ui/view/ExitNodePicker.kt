@@ -34,7 +34,9 @@ import com.tailscale.ipn.ui.util.itemsWithDividers
 import com.tailscale.ipn.ui.viewModel.ExitNodePickerNav
 import com.tailscale.ipn.ui.viewModel.ExitNodePickerViewModel
 import com.tailscale.ipn.ui.viewModel.ExitNodePickerViewModelFactory
+import com.tailscale.ipn.ui.viewModel.ProtonBridge
 import com.tailscale.ipn.ui.viewModel.selected
+import java.util.Locale
 import kotlinx.coroutines.flow.MutableStateFlow
 
 @Composable
@@ -50,6 +52,9 @@ fun ExitNodePicker(
       val mullvadExitNodeCount by model.mullvadExitNodeCount.collectAsState()
       val anyActive by model.anyActive.collectAsState()
       val shouldShowMullvadInfo by model.shouldShowMullvadInfo.collectAsState()
+      val protonState by ProtonBridge.state.collectAsState()
+      val protonCountry by ProtonBridge.connectedCountry.collectAsState()
+      val protonActive = protonState == "Connected" || protonState == "Connecting"
       val allowLANAccess = Notifier.prefs.collectAsState().value?.ExitNodeAllowLANAccess == true
       val showRunAsExitNode by MDMSettings.runExitNode.flow.collectAsState()
       val allowLanAccessMDMDisposition by MDMSettings.exitNodeAllowLANAccess.flow.collectAsState()
@@ -73,7 +78,7 @@ fun ExitNodePicker(
                 ExitNodePickerViewModel.ExitNode(
                     label = stringResource(R.string.none),
                     online = MutableStateFlow(true),
-                    selected = !anyActive,
+                    selected = !anyActive && !protonActive,
                 ))
           }
           if (showRunAsExitNode.value == ShowHide.Show) {
@@ -97,6 +102,11 @@ fun ExitNodePicker(
             Lists.SectionDivider()
             MullvadInfoItem(nav)
           }
+        }
+
+        item(key = "proton") {
+          Lists.SectionDivider()
+          ProtonExitItem(nav, active = protonActive, state = protonState, countryCode = protonCountry)
         }
 
         if (!allowLanAccessMDMDisposition.value.hiddenFromUser) {
@@ -171,6 +181,42 @@ fun MullvadItem(nav: ExitNodePickerNav, count: Int, selected: Boolean) {
           }
         })
   }
+}
+
+@Composable
+fun ProtonExitItem(
+    nav: ExitNodePickerNav,
+    active: Boolean,
+    state: String,
+    countryCode: String,
+) {
+  Box {
+    ListItem(
+        modifier = Modifier.clickable { nav.onNavigateToProton() },
+        headlineContent = {
+          Text(stringResource(R.string.proton_vpn), style = MaterialTheme.typography.bodyMedium)
+        },
+        supportingContent = {
+          val subtitle =
+              when {
+                active && countryCode.isNotEmpty() ->
+                    "$state — ${protonCountryDisplayName(countryCode)}"
+                active -> state
+                else -> stringResource(R.string.proton_exit_subtitle)
+              }
+          Text(subtitle, style = MaterialTheme.typography.bodyMedium)
+        },
+        trailingContent = {
+          if (active) {
+            Icon(Icons.Outlined.Check, null)
+          }
+        })
+  }
+}
+
+private fun protonCountryDisplayName(code: String): String {
+  val name = Locale("", code).displayCountry
+  return if (name.isBlank() || name == code) code else name
 }
 
 @Composable

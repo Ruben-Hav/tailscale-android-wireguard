@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -78,6 +79,104 @@ type protonAPI struct {
 	hvTokenType         string
 	pendingHVStartToken string
 	pendingHVMethods    string
+
+	// persist stores the session in the app's encrypted prefs across restarts.
+	persist AppContext
+}
+
+const protonSessionPrefKey = "proton.session.v1"
+
+// persistedSession is the JSON blob saved to encrypted prefs.
+type persistedSession struct {
+	UID          string `json:"uid"`
+	AccessToken  string `json:"at"`
+	RefreshToken string `json:"rt"`
+	HVToken      string `json:"hvt"`
+	HVTokenType  string `json:"hvtt"`
+	MaxTier      int    `json:"tier"`
+}
+
+func (a *protonAPI) setPersistence(ctx AppContext) {
+	a.mu.Lock()
+	a.persist = ctx
+	a.mu.Unlock()
+}
+
+func (a *protonAPI) saveSession() {
+	a.mu.Lock()
+	ctx := a.persist
+	loggedIn := a.session.loggedIn
+	ps := persistedSession{
+		UID: a.session.UID, AccessToken: a.session.AccessToken, RefreshToken: a.session.RefreshToken,
+		HVToken: a.hvToken, HVTokenType: a.hvTokenType, MaxTier: a.maxTier,
+	}
+	a.mu.Unlock()
+	if ctx == nil || !loggedIn {
+		return
+	}
+	b, err := json.Marshal(ps)
+	if err != nil {
+		return
+	}
+	if err := ctx.EncryptToPref(protonSessionPrefKey, string(b)); err != nil {
+		log.Printf("proton: save session: %v", err)
+	}
+}
+
+// loadSession restores a previously saved session. Returns whether one existed.
+func (a *protonAPI) loadSession() bool {
+	a.mu.Lock()
+	ctx := a.persist
+	a.mu.Unlock()
+	if ctx == nil {
+		return false
+	}
+	s, err := ctx.DecryptFromPref(protonSessionPrefKey)
+	if err != nil || s == "" {
+		return false
+	}
+	var ps persistedSession
+	if json.Unmarshal([]byte(s), &ps) != nil || ps.UID == "" {
+		return false
+	}
+	a.mu.Lock()
+	a.session = protonSession{UID: ps.UID, AccessToken: ps.AccessToken, RefreshToken: ps.RefreshToken, loggedIn: true}
+	a.hvToken = ps.HVToken
+	a.hvTokenType = ps.HVTokenType
+	a.maxTier = ps.MaxTier
+	a.mu.Unlock()
+	log.Printf("proton: restored saved session")
+	return true
+}
+
+func (a *protonAPI) clearPersisted() {
+	a.mu.Lock()
+	ctx := a.persist
+	a.mu.Unlock()
+	if ctx != nil {
+		_ = ctx.EncryptToPref(protonSessionPrefKey, "")
+	}
+}
+
+// savePref / loadPref persist a small string value via the app's encrypted prefs.
+func (a *protonAPI) savePref(key, val string) {
+	a.mu.Lock()
+	ctx := a.persist
+	a.mu.Unlock()
+	if ctx != nil {
+		_ = ctx.EncryptToPref(key, val)
+	}
+}
+
+func (a *protonAPI) loadPref(key string) string {
+	a.mu.Lock()
+	ctx := a.persist
+	a.mu.Unlock()
+	if ctx == nil {
+		return ""
+	}
+	s, _ := ctx.DecryptFromPref(key)
+	return s
 }
 
 func newProtonAPI() *protonAPI {
@@ -131,8 +230,12 @@ func (e *protonError) err() error {
 }
 
 // do sends a JSON request and decodes the JSON response into out. If authed, it
-// attaches the session UID + bearer token.
+// attaches the session UID + bearer token, and refreshes the token once on 401.
 func (a *protonAPI) do(method, path string, body any, out any, authed bool) error {
+	return a.doRetry(method, path, body, out, authed, true)
+}
+
+func (a *protonAPI) doRetry(method, path string, body any, out any, authed, allowRefresh bool) error {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -184,6 +287,12 @@ func (a *protonAPI) do(method, path string, body any, out any, authed bool) erro
 		a.mu.Unlock()
 		return errHVRequired
 	}
+	// Expired/invalid access token on a non-auth endpoint: refresh once and retry.
+	if perr.Code == 401 && authed && allowRefresh && !strings.HasPrefix(path, "/auth/") {
+		if err := a.refresh(); err == nil {
+			return a.doRetry(method, path, body, out, authed, false)
+		}
+	}
 	if e := perr.err(); e != nil {
 		return e
 	}
@@ -195,6 +304,43 @@ func (a *protonAPI) do(method, path string, body any, out any, authed bool) erro
 			return fmt.Errorf("proton: decode %s: %w", path, err)
 		}
 	}
+	return nil
+}
+
+// refresh obtains a new access token using the stored refresh token, and
+// re-persists the session.
+func (a *protonAPI) refresh() error {
+	a.mu.Lock()
+	uid, rt := a.session.UID, a.session.RefreshToken
+	a.mu.Unlock()
+	if uid == "" || rt == "" {
+		return errors.New("proton: no refresh token")
+	}
+	body := map[string]string{
+		"GrantType":    "refresh_token",
+		"RefreshToken": rt,
+		"ResponseType": "token",
+		"RedirectURI":  "https://protonvpn.com",
+	}
+	var rr struct {
+		UID          string `json:"UID"`
+		AccessToken  string `json:"AccessToken"`
+		RefreshToken string `json:"RefreshToken"`
+	}
+	if err := a.doRetry(http.MethodPost, "/auth/v4/refresh", body, &rr, true, false); err != nil {
+		log.Printf("proton: token refresh failed: %v", err)
+		return err
+	}
+	a.mu.Lock()
+	a.session.AccessToken = rr.AccessToken
+	if rr.RefreshToken != "" {
+		a.session.RefreshToken = rr.RefreshToken
+	}
+	if rr.UID != "" {
+		a.session.UID = rr.UID
+	}
+	a.mu.Unlock()
+	a.saveSession()
 	return nil
 }
 
@@ -345,7 +491,9 @@ func (a *protonAPI) Logout() error {
 	}
 	a.mu.Lock()
 	a.session = protonSession{}
+	a.hvToken, a.hvTokenType = "", ""
 	a.mu.Unlock()
+	a.clearPersisted()
 	return err
 }
 
@@ -359,14 +507,15 @@ func (a *protonAPI) loggedIn() bool {
 
 // logicalServer is one ProtonVPN logical server (a country/city endpoint).
 type logicalServer struct {
-	Name        string            `json:"Name"`
-	ExitCountry string            `json:"ExitCountry"`
-	City        string            `json:"City"`
-	Tier        int               `json:"Tier"`
-	Features    int               `json:"Features"`
-	Load        int               `json:"Load"`
-	Score       float64           `json:"Score"`
-	Status      int               `json:"Status"` // 1 = enabled
+	ID          string             `json:"ID"`
+	Name        string             `json:"Name"`
+	ExitCountry string             `json:"ExitCountry"`
+	City        string             `json:"City"`
+	Tier        int                `json:"Tier"`
+	Features    int                `json:"Features"`
+	Load        int                `json:"Load"`
+	Score       float64            `json:"Score"`
+	Status      int                `json:"Status"` // 1 = enabled
 	Servers     []connectingDomain `json:"Servers"`
 }
 

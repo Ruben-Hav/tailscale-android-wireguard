@@ -4,6 +4,8 @@ package com.tailscale.ipn.ui.viewModel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.tailscale.ipn.ui.localapi.Client
+import com.tailscale.ipn.ui.model.Ipn
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -15,6 +17,22 @@ import libtailscale.Libtailscale
 import libtailscale.ProtonStatusReceiver
 
 @Serializable data class ProtonCountry(val code: String, val minTier: Int = 0, val count: Int = 0)
+
+@Serializable
+data class ProtonServer(
+    val id: String,
+    val name: String,
+    val city: String = "",
+    val load: Int = 0,
+    val tier: Int = 0
+)
+
+@Serializable
+data class ProtonServerStatus(
+    val name: String = "",
+    val country: String = "",
+    val load: Int = 0
+)
 
 /**
  * ProtonBridge is the singleton link between the Kotlin UI and the Go ProtonVPN control + data
@@ -42,6 +60,25 @@ object ProtonBridge : ProtonStatusReceiver {
   private val _busy = MutableStateFlow(false)
   val busy: StateFlow<Boolean> = _busy
 
+  // Country code of the currently selected Proton exit (for the exit-node UI).
+  private val _connectedCountry = MutableStateFlow("")
+  val connectedCountry: StateFlow<String> = _connectedCountry
+
+  // Favorite country codes (UI-only, persisted in Go) and the servers of the
+  // country currently being drilled into.
+  private val _favorites = MutableStateFlow<Set<String>>(emptySet())
+  val favorites: StateFlow<Set<String>> = _favorites
+  private val _servers = MutableStateFlow<List<ProtonServer>>(emptyList())
+  val servers: StateFlow<List<ProtonServer>> = _servers
+
+  // Connected server name + (connect-time) load %, and the latest ping result.
+  private val _connectedServerName = MutableStateFlow("")
+  val connectedServerName: StateFlow<String> = _connectedServerName
+  private val _connectedLoad = MutableStateFlow(0)
+  val connectedLoad: StateFlow<Int> = _connectedLoad
+  private val _pingResult = MutableStateFlow("")
+  val pingResult: StateFlow<String> = _pingResult
+
   // Human verification (CAPTCHA) WebView.
   private val _needsCaptcha = MutableStateFlow(false)
   val needsCaptcha: StateFlow<Boolean> = _needsCaptcha
@@ -50,6 +87,10 @@ object ProtonBridge : ProtonStatusReceiver {
   private var pendingUser = ""
   private var pendingPass = ""
 
+  // Custom DNS server(s) used while Proton is enabled (comma-separated IPs).
+  private val _customDns = MutableStateFlow("")
+  val customDns: StateFlow<String> = _customDns
+
   // Manual .conf fallback (debug).
   private val _config = MutableStateFlow("")
   val config: StateFlow<String> = _config
@@ -57,6 +98,150 @@ object ProtonBridge : ProtonStatusReceiver {
   fun register() {
     Libtailscale.setProtonStatusReceiver(this)
     refreshLoginState()
+    loadCustomDns()
+    loadFavorites()
+  }
+
+  // --- Favorites (country codes; persisted in Go, UI-only) ---
+
+  fun loadFavorites() {
+    _favorites.value =
+        try {
+          Libtailscale.protonGetFavoriteCountries()
+              .split(",")
+              .map { it.trim() }
+              .filter { it.isNotEmpty() }
+              .toSet()
+        } catch (e: Exception) {
+          emptySet()
+        }
+  }
+
+  fun toggleFavorite(code: String) {
+    val next = _favorites.value.toMutableSet()
+    if (!next.add(code)) next.remove(code)
+    _favorites.value = next
+    try {
+      Libtailscale.protonSetFavoriteCountries(next.joinToString(","))
+    } catch (e: Exception) {
+      // best effort
+    }
+  }
+
+  // --- Individual servers in a country ---
+
+  fun loadServers(countryCode: String) {
+    _busy.value = true
+    try {
+      val raw = Libtailscale.protonListServers(countryCode)
+      _servers.value = json.decodeFromString<List<ProtonServer>>(raw)
+    } catch (e: Exception) {
+      _servers.value = emptyList()
+      _error.value = "Couldn't load servers: ${e.message}"
+    } finally {
+      _busy.value = false
+    }
+  }
+
+  fun connectServer(serverId: String, countryCode: String) {
+    _error.value = null
+    _state.value = "Connecting"
+    _connectedCountry.value = countryCode
+    try {
+      Libtailscale.protonConnectServer(serverId)
+    } catch (e: Exception) {
+      _state.value = "Disconnected"
+      _connectedCountry.value = ""
+      _error.value = "Connect failed: ${e.message}"
+    }
+  }
+
+  // --- Quick change: fastest server in your country / fastest overall ---
+
+  fun fastestInCountry() {
+    _error.value = null
+    _state.value = "Connecting"
+    try {
+      Libtailscale.protonFastestInCountry()
+    } catch (e: Exception) {
+      _state.value = "Connected"
+      _error.value = "Couldn't switch server: ${e.message}"
+    }
+  }
+
+  fun fastestOverall() {
+    _error.value = null
+    _state.value = "Connecting"
+    try {
+      Libtailscale.protonFastestOverall()
+    } catch (e: Exception) {
+      _state.value = "Connected"
+      _error.value = "Couldn't switch server: ${e.message}"
+    }
+  }
+
+  // --- Connected server status + latency ---
+
+  fun refreshCurrentServer() {
+    try {
+      val info = json.decodeFromString<ProtonServerStatus>(Libtailscale.protonCurrentServer())
+      if (info.name != _connectedServerName.value) _pingResult.value = ""
+      _connectedServerName.value = info.name
+      _connectedLoad.value = info.load
+    } catch (e: Exception) {
+      _connectedServerName.value = ""
+      _connectedLoad.value = 0
+    }
+  }
+
+  fun ping() {
+    _pingResult.value = "…"
+    try {
+      _pingResult.value = "${Libtailscale.protonPingCurrent()} ms"
+    } catch (e: Exception) {
+      _pingResult.value = "unreachable"
+    }
+  }
+
+  // tileActive / fastestInCountryFromTile are called from the Quick Settings tile
+  // (ProtonQuickServerTileService), which has no ViewModel/coroutine scope.
+  fun tileActive(): Boolean = _state.value == "Connected"
+
+  fun fastestInCountryFromTile() {
+    Thread {
+          try {
+            Libtailscale.protonFastestInCountry()
+          } catch (e: Exception) {
+            _error.value = "Couldn't switch server: ${e.message}"
+          }
+        }
+        .start()
+  }
+
+  // --- Custom DNS (run on a background thread) ---
+
+  fun loadCustomDns() {
+    _customDns.value =
+        try {
+          Libtailscale.protonCustomDNS()
+        } catch (e: Exception) {
+          ""
+        }
+  }
+
+  /**
+   * setCustomDns sets the DNS server(s) used whenever Proton is enabled, as a comma-separated list
+   * of IPs (empty = Proton/Tailscale default). Applies immediately if currently connected.
+   */
+  fun setCustomDns(value: String) {
+    val cleaned = value.trim()
+    try {
+      Libtailscale.protonSetCustomDNS(cleaned)
+      _customDns.value = cleaned
+      _error.value = null
+    } catch (e: Exception) {
+      _error.value = "Invalid DNS: ${e.message}"
+    }
   }
 
   fun setConfig(value: String) {
@@ -66,6 +251,13 @@ object ProtonBridge : ProtonStatusReceiver {
   // --- libtailscale.ProtonStatusReceiver (called from Go) ---
   override fun onProtonState(state: String) {
     _state.value = state
+    refreshCurrentServer()
+    // Reflect Proton's connection state on the Quick Settings tile.
+    try {
+      com.tailscale.ipn.ProtonQuickServerTileService.updateTile()
+    } catch (e: Throwable) {
+      // tile not bound / not on a UI build — ignore
+    }
   }
 
   override fun onProtonError(code: Long, description: String) {
@@ -162,10 +354,12 @@ object ProtonBridge : ProtonStatusReceiver {
   fun connectCountry(code: String) {
     _error.value = null
     _state.value = "Connecting"
+    _connectedCountry.value = code
     try {
       Libtailscale.protonConnectCountry(code)
     } catch (e: Exception) {
       _state.value = "Disconnected"
+      _connectedCountry.value = ""
       _error.value = "Connect failed: ${e.message}"
     }
   }
@@ -212,6 +406,7 @@ object ProtonBridge : ProtonStatusReceiver {
     } catch (e: Exception) {
       _error.value = "Disconnect failed: ${e.message}"
     }
+    _connectedCountry.value = ""
   }
 
   private fun confValue(conf: String, key: String): String? {
@@ -230,8 +425,27 @@ class ProtonViewModel : ViewModel() {
   val config: StateFlow<String> = ProtonBridge.config
   val needsCaptcha: StateFlow<Boolean> = ProtonBridge.needsCaptcha
   val captchaUrl: StateFlow<String> = ProtonBridge.captchaUrl
+  val customDns: StateFlow<String> = ProtonBridge.customDns
+  val connectedCountry: StateFlow<String> = ProtonBridge.connectedCountry
+  val favorites: StateFlow<Set<String>> = ProtonBridge.favorites
+  val servers: StateFlow<List<ProtonServer>> = ProtonBridge.servers
+  val connectedServerName: StateFlow<String> = ProtonBridge.connectedServerName
+  val connectedLoad: StateFlow<Int> = ProtonBridge.connectedLoad
+  val pingResult: StateFlow<String> = ProtonBridge.pingResult
+
+  init {
+    viewModelScope.launch(Dispatchers.IO) {
+      ProtonBridge.loadCustomDns()
+      ProtonBridge.loadFavorites()
+      ProtonBridge.refreshCurrentServer()
+    }
+  }
 
   fun setConfig(value: String) = ProtonBridge.setConfig(value)
+
+  fun setCustomDns(value: String) {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.setCustomDns(value) }
+  }
 
   fun login(username: String, password: String) {
     viewModelScope.launch(Dispatchers.IO) { ProtonBridge.login(username, password) }
@@ -253,6 +467,41 @@ class ProtonViewModel : ViewModel() {
 
   fun connectCountry(code: String) {
     viewModelScope.launch(Dispatchers.IO) { ProtonBridge.connectCountry(code) }
+    clearTailscaleExitNode()
+  }
+
+  fun connectServer(serverId: String, countryCode: String) {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.connectServer(serverId, countryCode) }
+    clearTailscaleExitNode()
+  }
+
+  fun toggleFavorite(code: String) {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.toggleFavorite(code) }
+  }
+
+  fun loadServers(countryCode: String) {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.loadServers(countryCode) }
+  }
+
+  fun fastestOverall() {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.fastestOverall() }
+    clearTailscaleExitNode()
+  }
+
+  fun fastestInCountry() {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.fastestInCountry() }
+  }
+
+  fun ping() {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.ping() }
+  }
+
+  // Proton owns the default route once connected; clear any Tailscale exit node
+  // so they don't both try to capture non-tailnet traffic.
+  private fun clearTailscaleExitNode() {
+    val prefsOut = Ipn.MaskedPrefs()
+    prefsOut.ExitNodeID = null
+    Client(viewModelScope).editPrefs(prefsOut) {}
   }
 
   fun logout() {

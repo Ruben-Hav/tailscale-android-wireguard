@@ -89,6 +89,12 @@ func start(dataDir, directFileRoot string, hwAttestationPref bool, appCtx AppCon
 		os.Setenv("HOME", dataDir)
 	}
 
+	// Restore any persisted ProtonVPN session (runs synchronously before Start
+	// returns, so the UI sees the logged-in state immediately).
+	protonAPIClient.setPersistence(appCtx)
+	protonAPIClient.loadSession()
+	loadProtonCustomDNS()
+
 	return newApp(dataDir, directFileRoot, hwAttestationPref, appCtx)
 }
 
@@ -275,6 +281,9 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 			protonMgr.mu.Lock()
 			protonMgr.receiver = r
 			protonMgr.mu.Unlock()
+		case <-onProtonRefresh:
+			// Re-apply the TUN so a custom-DNS change takes effect immediately.
+			b.refreshTUN()
 		}
 	}
 }

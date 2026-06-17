@@ -8,34 +8,55 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.tailscale.ipn.R
+import com.tailscale.ipn.ui.viewModel.ProtonCountry
 import com.tailscale.ipn.ui.viewModel.ProtonViewModel
 import java.util.Locale
 
 /**
- * Lists ProtonVPN exit countries. Tapping one selects a server in that country and connects;
- * non-tailnet traffic then exits through it.
+ * Lists ProtonVPN exit countries. Tapping a row auto-picks the fastest server in that country and
+ * connects. The leading star toggles a favorite (favorites sort to the top); the trailing arrow
+ * drills into the individual servers of that country.
  */
 @Composable
-fun ProtonCountryPickerView(backToProton: BackNavigation, model: ProtonViewModel = viewModel()) {
+fun ProtonCountryPickerView(
+    backToProton: BackNavigation,
+    onNavigateToServers: (String) -> Unit,
+    model: ProtonViewModel = viewModel()
+) {
   val countries by model.countries.collectAsState()
+  val favorites by model.favorites.collectAsState()
   val busy by model.busy.collectAsState()
 
   LaunchedEffect(Unit) {
     if (countries.isEmpty()) model.loadCountries()
   }
+
+  // Favorites first, then alphabetical by display name.
+  val ordered =
+      remember(countries, favorites) {
+        countries.sortedWith(
+            compareByDescending<ProtonCountry> { favorites.contains(it.code) }
+                .thenBy { countryDisplayName(it.code) })
+      }
 
   Scaffold(topBar = { Header(R.string.proton_choose_country, onBack = backToProton) }) {
       innerPadding ->
@@ -47,16 +68,33 @@ fun ProtonCountryPickerView(backToProton: BackNavigation, model: ProtonViewModel
       }
     } else {
       LazyColumn(modifier = Modifier.padding(innerPadding)) {
-        items(countries) { country ->
+        items(ordered, key = { it.code }) { country ->
+          val isFav = favorites.contains(country.code)
           ListItem(
               modifier =
                   Modifier.clickable {
                     model.connectCountry(country.code)
                     backToProton()
                   },
+              leadingContent = {
+                IconButton(onClick = { model.toggleFavorite(country.code) }) {
+                  Text(
+                      text = if (isFav) "★" else "☆", // ★ / ☆
+                      color =
+                          if (isFav) MaterialTheme.colorScheme.primary
+                          else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+              },
               headlineContent = { Text(countryDisplayName(country.code)) },
               supportingContent = {
                 Text(stringResource(R.string.proton_server_count, country.count))
+              },
+              trailingContent = {
+                IconButton(onClick = { onNavigateToServers(country.code) }) {
+                  Icon(
+                      Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                      contentDescription = stringResource(R.string.proton_view_servers))
+                }
               })
           HorizontalDivider()
         }

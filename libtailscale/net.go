@@ -108,7 +108,19 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		return err
 	}
 	b.logger.Logf("updateTUN: set MTU")
-	if dcfg != nil {
+	// DNS: when Proton is enabled and the user configured a custom DNS, replace
+	// the VpnService resolvers with their server(s). Those are non-tailnet IPs,
+	// so DNS queries flow through the Proton tunnel (see the demux below). When
+	// Proton is off, Tailscale's DNS config is used unchanged.
+	if custom := protonCustomDNSAddrs(); protonMgr.enabled.Load() && len(custom) > 0 {
+		for _, ip := range custom {
+			if err := builder.AddDNSServer(ip.String()); err != nil {
+				return err
+			}
+		}
+		b.logger.Logf("updateTUN: set %d Proton custom nameserver(s)", len(custom))
+		log.Printf("proton: using custom DNS %v (routed through tunnel)", custom)
+	} else if dcfg != nil {
 		nameservers := dcfg.Nameservers
 		if b.avoidEmptyDNS && len(nameservers) == 0 {
 			nameservers = googleDNSServers

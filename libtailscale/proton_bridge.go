@@ -92,9 +92,57 @@ type protonManager struct {
 	// is the live demux so its table can be updated in place on reconfigure.
 	tailnetTable atomic.Pointer[bart.Lite]
 	curDemux     atomic.Pointer[demuxRouter]
+
+	// customDNS, when set, replaces the VpnService DNS servers while Proton is
+	// enabled (routed through the tunnel). nil/empty means normal DNS.
+	customDNS atomic.Pointer[[]netip.Addr]
+
+	// curLogicalID / curCountry identify the currently-connected Proton logical
+	// server and its exit country, for the "fastest" quick actions. curServerName
+	// / curServerLoad / curEntryIP are shown in the UI and used by the latency
+	// probe. All guarded by mu.
+	curLogicalID string
+	curCountry   string
+	curServerName string
+	curServerLoad int
+	curEntryIP    string
 }
 
 var protonMgr = &protonManager{}
+
+// currentConn returns the connected logical server ID and exit country (empty
+// when not connected via the dynamic path).
+func (m *protonManager) currentConn() (logicalID, country string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.curLogicalID, m.curCountry
+}
+
+// currentServerInfo returns the connected server's display name, exit country,
+// and (connect-time) load percentage.
+func (m *protonManager) currentServerInfo() (name, country string, load int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.curServerName, m.curCountry, m.curServerLoad
+}
+
+// currentEntryIP returns the WireGuard entry IP of the connected server (for the
+// latency probe), or "" when not connected.
+func (m *protonManager) currentEntryIP() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.curEntryIP
+}
+
+func (m *protonManager) clearCurrentConn() {
+	m.mu.Lock()
+	m.curLogicalID = ""
+	m.curCountry = ""
+	m.curServerName = ""
+	m.curServerLoad = 0
+	m.curEntryIP = ""
+	m.mu.Unlock()
+}
 
 // protonConnectParams carries everything ProtonConnect needs to bring up a tunnel.
 type protonConnectParams struct {
@@ -105,6 +153,14 @@ type protonConnectParams struct {
 	agentCAsPEM           string // local-agent CA bundle
 	agentServerName       string // local-agent TLS server name
 	keepalive             int
+
+	// logicalID / country / serverName / serverLoad identify the Proton logical
+	// server being connected, recorded on success for the "fastest" actions and
+	// the connected-server UI.
+	logicalID  string
+	country    string
+	serverName string
+	serverLoad int
 
 	// manualPrivateKeyB64, when set, is a raw WireGuard private key (base64) used
 	// instead of the dynamically generated key. Set by ProtonConnectManual for
@@ -149,6 +205,7 @@ var (
 	onProtonConnect    = make(chan protonConnectRequest)
 	onProtonDisconnect = make(chan struct{}, 1)
 	onProtonReceiver   = make(chan ProtonStatusReceiver, 1)
+	onProtonRefresh    = make(chan struct{}, 1) // re-apply the TUN (e.g. custom DNS changed)
 )
 
 // --- Exported gomobile bridge functions (callable from Kotlin) ---
@@ -307,6 +364,11 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 	protonMgr.mu.Lock()
 	protonMgr.dev = dev
 	protonMgr.cfg = cfg
+	protonMgr.curLogicalID = p.logicalID
+	protonMgr.curCountry = p.country
+	protonMgr.curServerName = p.serverName
+	protonMgr.curServerLoad = p.serverLoad
+	protonMgr.curEntryIP = hostOnly(p.endpoint)
 	protonMgr.mu.Unlock()
 
 	// Re-run updateTUN to install the demux and capture the default route.
@@ -360,6 +422,7 @@ func (m *protonManager) currentAgent() *protonAgent {
 func (b *backend) protonDisconnect() {
 	protonMgr.enabled.Store(false)
 	protonMgr.ready.Store(false)
+	protonMgr.clearCurrentConn()
 	protonMgr.teardownDevice()
 	// Re-run updateTUN to drop the demux + default route (back to tailnet-only).
 	b.refreshTUN()

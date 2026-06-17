@@ -138,13 +138,81 @@ private fun TwoFactorSection(model: ProtonViewModel, busy: Boolean) {
 
 @Composable
 private fun ConnectedSection(model: ProtonViewModel, onNavigateToCountries: () -> Unit) {
+  val state by model.state.collectAsState()
+  val connected = state == "Connected"
+
+  if (connected) {
+    CurrentServerSection(model)
+    Spacer(Modifier.height(16.dp))
+  }
   Button(onClick = onNavigateToCountries, modifier = Modifier.fillMaxWidth()) {
     Text(stringResource(R.string.proton_choose_country))
+  }
+  if (connected) {
+    // Quick change: fastest server in your current country, or fastest anywhere.
+    Spacer(Modifier.height(8.dp))
+    Row(modifier = Modifier.fillMaxWidth()) {
+      OutlinedButton(onClick = { model.fastestInCountry() }, modifier = Modifier.weight(1f)) {
+        Text(stringResource(R.string.proton_fastest_in_country))
+      }
+      Spacer(Modifier.width(8.dp))
+      OutlinedButton(onClick = { model.fastestOverall() }, modifier = Modifier.weight(1f)) {
+        Text(stringResource(R.string.proton_fastest_overall))
+      }
+    }
   }
   Spacer(Modifier.height(8.dp))
   OutlinedButton(onClick = { model.disconnect() }, modifier = Modifier.fillMaxWidth()) {
     Text(stringResource(R.string.proton_disconnect))
   }
+  Spacer(Modifier.height(24.dp))
+  CustomDnsSection(model)
   Spacer(Modifier.height(16.dp))
   TextButton(onClick = { model.logout() }) { Text(stringResource(R.string.proton_logout)) }
+}
+
+@Composable
+private fun CurrentServerSection(model: ProtonViewModel) {
+  val serverName by model.connectedServerName.collectAsState()
+  val load by model.connectedLoad.collectAsState()
+  val ping by model.pingResult.collectAsState()
+  if (serverName.isEmpty()) return
+
+  Text(
+      stringResource(R.string.proton_connected_to, serverName),
+      style = MaterialTheme.typography.titleMedium)
+  Spacer(Modifier.height(2.dp))
+  val loadText = stringResource(R.string.proton_server_load, load)
+  Text(
+      if (ping.isNotEmpty()) "$loadText · $ping" else loadText,
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant)
+  Spacer(Modifier.height(8.dp))
+  OutlinedButton(onClick = { model.ping() }) { Text(stringResource(R.string.proton_ping)) }
+}
+
+@Composable
+private fun CustomDnsSection(model: ProtonViewModel) {
+  val savedDns by model.customDns.collectAsState()
+  // Re-seed the editable field whenever the saved value changes (e.g. on load).
+  var dns by remember(savedDns) { mutableStateOf(savedDns) }
+
+  Text(stringResource(R.string.proton_dns_title), style = MaterialTheme.typography.titleMedium)
+  Spacer(Modifier.height(4.dp))
+  Text(
+      stringResource(R.string.proton_dns_hint),
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant)
+  Spacer(Modifier.height(8.dp))
+  OutlinedTextField(
+      value = dns,
+      onValueChange = { dns = it },
+      modifier = Modifier.fillMaxWidth(),
+      singleLine = true,
+      placeholder = { Text("1.1.1.1, 1.0.0.1") },
+      label = { Text(stringResource(R.string.proton_dns_label)) })
+  Spacer(Modifier.height(8.dp))
+  Button(onClick = { model.setCustomDns(dns.trim()) }, enabled = dns.trim() != savedDns) {
+    Text(stringResource(R.string.proton_dns_apply))
+  }
 }

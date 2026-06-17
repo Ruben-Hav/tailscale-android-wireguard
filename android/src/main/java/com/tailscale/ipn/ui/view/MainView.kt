@@ -53,6 +53,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -111,8 +112,12 @@ import com.tailscale.ipn.ui.util.set
 import com.tailscale.ipn.ui.viewModel.AppViewModel
 import com.tailscale.ipn.ui.viewModel.IpnViewModel.NodeState
 import com.tailscale.ipn.ui.viewModel.MainViewModel
+import com.tailscale.ipn.ui.viewModel.ProtonBridge
 import com.tailscale.ipn.util.FeatureFlags
+import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.launch
 
 // Navigation actions for the MainView
 data class MainViewNavigation(
@@ -295,6 +300,17 @@ fun ExitNodeStatus(navAction: () -> Unit, viewModel: MainViewModel) {
   val exitNodePeer = chosenExitNodeId?.let { id -> netmap?.Peers?.find { it.StableID == id } }
   val name = exitNodePeer?.exitNodeName
   val managedByOrganization by viewModel.managedByOrganization.collectAsState()
+
+  // ProtonVPN is our own tunnel, not a Tailscale exit-node peer, so the normal
+  // logic above never sees it. When Proton is the active exit route (and no
+  // Tailscale exit node is set), render a dedicated status row instead.
+  val protonState by ProtonBridge.state.collectAsState()
+  val protonCountry by ProtonBridge.connectedCountry.collectAsState()
+  val protonActive = protonState == "Connected" || protonState == "Connecting"
+  if (protonActive && chosenExitNodeId == null) {
+    ProtonExitNodeStatus(navAction = navAction, state = protonState, countryCode = protonCountry)
+    return
+  }
   Box(
       modifier =
           Modifier.fillMaxWidth().background(color = MaterialTheme.colorScheme.surfaceContainer)) {
@@ -405,6 +421,61 @@ fun ExitNodeStatus(navAction: () -> Unit, viewModel: MainViewModel) {
                   })
             }
       }
+}
+
+@Composable
+fun ProtonExitNodeStatus(navAction: () -> Unit, state: String, countryCode: String) {
+  val scope = rememberCoroutineScope()
+  val label =
+      when {
+        state == "Connecting" -> stringResource(R.string.proton_exit_connecting)
+        countryCode.isNotEmpty() ->
+            stringResource(R.string.proton_exit_active, protonCountryLabel(countryCode))
+        else -> stringResource(R.string.proton_vpn)
+      }
+  Box(
+      modifier =
+          Modifier.fillMaxWidth().background(color = MaterialTheme.colorScheme.surfaceContainer)) {
+        Box(
+            modifier =
+                Modifier.padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 16.dp)
+                    .clip(shape = RoundedCornerShape(10.dp))
+                    .fillMaxWidth()) {
+              ListItem(
+                  modifier = Modifier.clickable { navAction() },
+                  colors = MaterialTheme.colorScheme.primaryListItem,
+                  overlineContent = {
+                    Text(
+                        text = stringResource(R.string.exit_node),
+                        style = MaterialTheme.typography.bodySmall)
+                  },
+                  headlineContent = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                      Text(
+                          text = label,
+                          style = MaterialTheme.typography.bodyMedium,
+                          maxLines = 1,
+                          overflow = TextOverflow.Ellipsis)
+                      Icon(
+                          imageVector = Icons.Outlined.ArrowDropDown,
+                          contentDescription = null,
+                          tint = MaterialTheme.colorScheme.onPrimary.copy(alpha = 0.7f))
+                    }
+                  },
+                  trailingContent = {
+                    Button(
+                        colors = MaterialTheme.colorScheme.secondaryButton,
+                        onClick = { scope.launch(Dispatchers.IO) { ProtonBridge.disconnect() } }) {
+                          Text(stringResource(R.string.disconnect))
+                        }
+                  })
+            }
+      }
+}
+
+private fun protonCountryLabel(code: String): String {
+  val name = Locale("", code).displayCountry
+  return if (name.isBlank() || name == code) code else name
 }
 
 @Composable

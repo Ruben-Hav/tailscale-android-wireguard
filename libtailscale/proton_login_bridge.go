@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sort"
 )
@@ -31,6 +32,7 @@ func ProtonLogin(username, password string) (string, error) {
 	}
 	if status == loginOK {
 		fetchTier()
+		protonAPIClient.saveSession()
 	}
 	return status, nil
 }
@@ -58,6 +60,7 @@ func ProtonSubmit2FA(code string) error {
 		return err
 	}
 	fetchTier()
+	protonAPIClient.saveSession()
 	return nil
 }
 
@@ -117,26 +120,169 @@ func ProtonListCountries() (string, error) {
 	return string(b), nil
 }
 
-// ProtonConnectCountry picks the best server in countryCode, registers a fresh
-// WireGuard key with Proton, and brings up the tunnel via the data plane.
+// ProtonConnectCountry auto-picks the fastest server in countryCode and connects.
 func ProtonConnectCountry(countryCode string) error {
-	if !protonAPIClient.loggedIn() {
-		return errors.New("proton: not logged in")
-	}
-	logicals, err := protonAPIClient.GetLogicals()
+	logicals, maxTier, err := protonLogicals()
 	if err != nil {
 		return err
 	}
-	protonAPIClient.mu.Lock()
-	maxTier := protonAPIClient.maxTier
-	protonAPIClient.mu.Unlock()
-
 	ls, dom := pickServer(logicals, countryCode, maxTier)
 	if dom == nil {
 		return fmt.Errorf("proton: no available server in %s", countryCode)
 	}
+	return connectToLogical(ls, dom)
+}
 
-	// Generate a fresh key and certify it (this registers the public key so the
+// ProtonConnectServer connects to a specific logical server (by its ID, as
+// returned by ProtonListServers), letting the user override the auto-pick.
+func ProtonConnectServer(logicalID string) error {
+	logicals, maxTier, err := protonLogicals()
+	if err != nil {
+		return err
+	}
+	var ls *logicalServer
+	for i := range logicals.LogicalServers {
+		if logicals.LogicalServers[i].ID == logicalID {
+			ls = &logicals.LogicalServers[i]
+			break
+		}
+	}
+	if ls == nil {
+		return fmt.Errorf("proton: server %s not found", logicalID)
+	}
+	if ls.Tier > maxTier {
+		return errors.New("proton: that server needs a higher plan")
+	}
+	dom := pickDomain(ls)
+	if dom == nil {
+		return fmt.Errorf("proton: server %s is offline", ls.Name)
+	}
+	return connectToLogical(ls, dom)
+}
+
+// ProtonFastestOverall connects to the fastest server across all countries
+// (the "Fastest overall" action). No-op if already on it.
+func ProtonFastestOverall() error {
+	logicals, maxTier, err := protonLogicals()
+	if err != nil {
+		return err
+	}
+	curLogicalID, _ := protonMgr.currentConn()
+	ls, dom := pickBest(logicals, maxTier, func(l *logicalServer) bool {
+		return l.ExitCountry != ""
+	})
+	if dom == nil {
+		return errors.New("proton: no server available")
+	}
+	if ls.ID == curLogicalID {
+		log.Printf("proton: already on the fastest server overall (%s)", ls.Name)
+		protonMgr.notifyState("Connected")
+		return nil
+	}
+	log.Printf("proton: fastest-overall -> %s (%s)", ls.ExitCountry, ls.Name)
+	return connectToLogical(ls, dom)
+}
+
+// ProtonFastestInCountry connects to the fastest server within the country you
+// are currently connected to (the "Fastest in country" action; also the QS
+// tile). No-op if already on it.
+func ProtonFastestInCountry() error {
+	curLogicalID, curCountry := protonMgr.currentConn()
+	if curCountry == "" {
+		return errors.New("proton: not connected")
+	}
+	logicals, maxTier, err := protonLogicals()
+	if err != nil {
+		return err
+	}
+	ls, dom := pickBest(logicals, maxTier, func(l *logicalServer) bool {
+		return l.ExitCountry == curCountry
+	})
+	if dom == nil {
+		return fmt.Errorf("proton: no server available in %s", curCountry)
+	}
+	if ls.ID == curLogicalID {
+		log.Printf("proton: already on the fastest server in %s (%s)", curCountry, ls.Name)
+		protonMgr.notifyState("Connected")
+		return nil
+	}
+	log.Printf("proton: fastest-in-country %s -> %s", curCountry, ls.Name)
+	return connectToLogical(ls, dom)
+}
+
+// ProtonCurrentServer returns the connected server as JSON {name, country, load}
+// ("{}" when not connected), for the UI's connected-server status line.
+func ProtonCurrentServer() string {
+	name, country, load := protonMgr.currentServerInfo()
+	if name == "" {
+		return "{}"
+	}
+	b, err := json.Marshal(map[string]any{"name": name, "country": country, "load": load})
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+// serverInfo is the per-server summary returned to the UI as JSON.
+type serverInfo struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	City string `json:"city"`
+	Load int    `json:"load"`
+	Tier int    `json:"tier"`
+}
+
+// ProtonListServers returns a JSON array of the individual servers in
+// countryCode (within the user's tier), sorted fastest-first by Score.
+func ProtonListServers(countryCode string) (string, error) {
+	logicals, maxTier, err := protonLogicals()
+	if err != nil {
+		return "", err
+	}
+	var picked []*logicalServer
+	for i := range logicals.LogicalServers {
+		ls := &logicals.LogicalServers[i]
+		if ls.Status != 1 || ls.ExitCountry != countryCode || ls.Tier > maxTier {
+			continue
+		}
+		picked = append(picked, ls)
+	}
+	sort.Slice(picked, func(i, j int) bool {
+		if picked[i].Score != picked[j].Score {
+			return picked[i].Score < picked[j].Score
+		}
+		return picked[i].Name < picked[j].Name
+	})
+	out := make([]serverInfo, 0, len(picked))
+	for _, ls := range picked {
+		out = append(out, serverInfo{ID: ls.ID, Name: ls.Name, City: ls.City, Load: ls.Load, Tier: ls.Tier})
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// protonLogicals fetches the logicals and the user's max tier, requiring login.
+func protonLogicals() (*logicalsResp, int, error) {
+	if !protonAPIClient.loggedIn() {
+		return nil, 0, errors.New("proton: not logged in")
+	}
+	logicals, err := protonAPIClient.GetLogicals()
+	if err != nil {
+		return nil, 0, err
+	}
+	protonAPIClient.mu.Lock()
+	maxTier := protonAPIClient.maxTier
+	protonAPIClient.mu.Unlock()
+	return logicals, maxTier, nil
+}
+
+// connectToLogical registers a fresh key and brings up the tunnel to ls/dom.
+func connectToLogical(ls *logicalServer, dom *connectingDomain) error {
+	// Generate a fresh key and certify it (registers the public key so the
 	// derived WireGuard key is accepted by the server).
 	pub, err := ProtonGenerateKey()
 	if err != nil {
@@ -146,19 +292,20 @@ func ProtonConnectCountry(countryCode string) error {
 	if err != nil {
 		return err
 	}
-
 	entryIP := dom.entryIP()
 	if entryIP == "" {
 		return fmt.Errorf("proton: server %s has no entry IP", ls.Name)
 	}
-	endpoint := fmt.Sprintf("%s:%d", entryIP, dom.port())
-
 	req := protonConnectRequest{
 		params: protonConnectParams{
 			serverPublicKeyBase64: dom.X25519PublicKey,
-			endpoint:              endpoint,
+			endpoint:              fmt.Sprintf("%s:%d", entryIP, dom.port()),
 			certPEM:               cert.Certificate,
 			clientAddresses:       "10.2.0.2/32", // Proton's fixed WireGuard client address
+			logicalID:             ls.ID,
+			country:               ls.ExitCountry,
+			serverName:            ls.Name,
+			serverLoad:            ls.Load,
 		},
 		reply: make(chan error, 1),
 	}
@@ -166,29 +313,50 @@ func ProtonConnectCountry(countryCode string) error {
 	return <-req.reply
 }
 
-// pickServer chooses the lowest-score enabled logical server in the country
-// within the user's tier, plus an online physical server within it.
-func pickServer(logicals *logicalsResp, countryCode string, maxTier int) (*logicalServer, *connectingDomain) {
+// pickDomain returns the first online physical server (with a WG pubkey) in ls.
+func pickDomain(ls *logicalServer) *connectingDomain {
+	for i := range ls.Servers {
+		d := &ls.Servers[i]
+		if d.Status == 1 && d.X25519PublicKey != "" {
+			return d
+		}
+	}
+	return nil
+}
+
+// pickBest selects the fastest accepted enabled logical within maxTier (lowest
+// Score, ties to lower Load) plus an online physical server in it.
+func pickBest(logicals *logicalsResp, maxTier int, accept func(*logicalServer) bool) (*logicalServer, *connectingDomain) {
 	var best *logicalServer
 	bestScore := math.MaxFloat64
+	bestLoad := math.MaxInt
 	for i := range logicals.LogicalServers {
 		ls := &logicals.LogicalServers[i]
-		if ls.Status != 1 || ls.ExitCountry != countryCode || ls.Tier > maxTier {
+		if ls.Status != 1 || ls.Tier > maxTier || !accept(ls) {
 			continue
 		}
-		if ls.Score < bestScore {
+		if ls.Score < bestScore || (ls.Score == bestScore && ls.Load < bestLoad) {
 			bestScore = ls.Score
+			bestLoad = ls.Load
 			best = ls
 		}
 	}
 	if best == nil {
 		return nil, nil
 	}
-	for i := range best.Servers {
-		d := &best.Servers[i]
-		if d.Status == 1 && d.X25519PublicKey != "" {
-			return best, d
-		}
+	return best, pickDomain(best)
+}
+
+// pickServer auto-selects the fastest enabled logical in countryCode (Proton's
+// Score is the load-balancing metric, lower = faster/least-loaded, the same
+// signal Proton's own "fastest" picker uses); the per-region auto-pick.
+func pickServer(logicals *logicalsResp, countryCode string, maxTier int) (*logicalServer, *connectingDomain) {
+	ls, dom := pickBest(logicals, maxTier, func(l *logicalServer) bool {
+		return l.ExitCountry == countryCode
+	})
+	if ls != nil {
+		log.Printf("proton: auto-picked %s in %s (score=%.2f load=%d tier=%d)",
+			ls.Name, countryCode, ls.Score, ls.Load, ls.Tier)
 	}
-	return best, nil
+	return ls, dom
 }

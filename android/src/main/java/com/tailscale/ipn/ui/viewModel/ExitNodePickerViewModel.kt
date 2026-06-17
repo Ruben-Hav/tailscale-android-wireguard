@@ -13,6 +13,7 @@ import com.tailscale.ipn.ui.notifier.Notifier
 import com.tailscale.ipn.ui.util.LoadingIndicator
 import com.tailscale.ipn.ui.util.set
 import java.util.TreeMap
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
@@ -27,6 +28,7 @@ data class ExitNodePickerNav(
     val onNavigateBackToMullvad: () -> Unit,
     val onNavigateToMullvadCountry: (String) -> Unit,
     val onNavigateToRunAsExitNode: () -> Unit,
+    val onNavigateToProton: () -> Unit,
 )
 
 class ExitNodePickerViewModelFactory(private val nav: ExitNodePickerNav) :
@@ -144,6 +146,12 @@ class ExitNodePickerViewModel(private val nav: ExitNodePickerNav) : IpnViewModel
 
   fun setExitNode(node: ExitNode) {
     LoadingIndicator.start()
+    // Selecting None or a Tailscale exit node takes over the default route, so
+    // turn ProtonVPN off to avoid the two fighting over non-tailnet traffic.
+    // Only when Proton is actually active, to avoid needless TUN churn.
+    if (ProtonBridge.state.value != "Disconnected") {
+      viewModelScope.launch(Dispatchers.IO) { ProtonBridge.disconnect() }
+    }
     val prefsOut = Ipn.MaskedPrefs()
     prefsOut.ExitNodeID = node.id
 

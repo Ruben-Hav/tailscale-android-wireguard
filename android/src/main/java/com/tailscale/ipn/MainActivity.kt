@@ -85,6 +85,7 @@ import com.tailscale.ipn.ui.view.PeerDetails
 import com.tailscale.ipn.ui.view.PermissionsView
 import com.tailscale.ipn.ui.view.PrimaryActionButton
 import com.tailscale.ipn.ui.view.ProtonCountryPickerView
+import com.tailscale.ipn.ui.view.ProtonServerPickerView
 import com.tailscale.ipn.ui.view.ProtonView
 import com.tailscale.ipn.ui.view.RunExitNodeView
 import com.tailscale.ipn.ui.view.SearchView
@@ -325,7 +326,8 @@ class MainActivity : ComponentActivity() {
                           onNavigateToMullvadInfo = { navController.navigate("mullvad_info") },
                           onNavigateBackToMullvad = backTo("mullvad"),
                           onNavigateToMullvadCountry = { navController.navigate("mullvad/$it") },
-                          onNavigateToRunAsExitNode = { navController.navigate("runExitNode") })
+                          onNavigateToRunAsExitNode = { navController.navigate("runExitNode") },
+                          onNavigateToProton = { navController.navigate("proton") })
                   val userSwitcherNav =
                       UserSwitcherNav(
                           backToSettings = backTo("settings"),
@@ -383,7 +385,21 @@ class MainActivity : ComponentActivity() {
                         backTo("settings"),
                         onNavigateToCountries = { navController.navigate("protonCountries") })
                   }
-                  composable("protonCountries") { ProtonCountryPickerView(backTo("proton")) }
+                  composable("protonCountries") {
+                    ProtonCountryPickerView(
+                        backToProton = backTo("proton"),
+                        onNavigateToServers = { cc ->
+                          navController.navigate("protonServers/$cc")
+                        })
+                  }
+                  composable(
+                      "protonServers/{countryCode}",
+                      arguments =
+                          listOf(navArgument("countryCode") { type = NavType.StringType })) {
+                        ProtonServerPickerView(
+                            countryCode = it.arguments!!.getString("countryCode")!!,
+                            backToCountries = backTo("protonCountries"))
+                      }
                   composable("about") { AboutView(backTo("settings")) }
                   composable("mdmSettings") { MDMSettingsDebugView(backTo("settings")) }
                   composable("managedBy") { ManagedByView(backTo("settings")) }
