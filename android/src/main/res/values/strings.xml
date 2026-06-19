@@ -31,7 +31,7 @@
 
     <!-- Strings for the about screen -->
     <string name="app_name" translatable="false">Tailscale</string>
-    <string name="tile_name" translatable="false">Tailscale</string>
+    <string name="tile_name" translatable="false">Protonscale</string>
     <string name="version">Version</string>
     <string name="about_view_header">About Tailscale</string>
     <string name="about_view_title">Tailscale for Android</string>
@@ -344,10 +344,15 @@
     <string name="proton_fastest_overall">Fastest overall</string>
     <string name="proton_connected_to">Connected to %1$s</string>
     <string name="proton_ping">Ping server</string>
-    <string name="proton_tile_name">Proton Server</string>
-    <string name="proton_tile_active">Tap: fastest server</string>
-    <string name="proton_tile_inactive">Proton off</string>
+    <string name="proton_tile_name">Exit node</string>
+    <string name="proton_tile_active">Connected</string>
+    <string name="proton_tile_inactive">Tap to connect</string>
     <string name="proton_tile_switching">Switching to fastest server…</string>
+    <string name="proton_autoconnect_title">Auto-connect on start</string>
+    <string name="proton_autoconnect_off_hint">Off. In Choose country, tap ▶ next to a country to connect it automatically when the VPN starts.</string>
+    <string name="proton_autoconnect_clear">Turn off</string>
+    <string name="proton_autoconnect_mark">Auto-connect to this country on start</string>
+    <string name="proton_autoconnect_badge">Auto-connect</string>
     <string name="your_current_selection_will_be_cleared">Your current selection will be cleared.</string>
     <string name="filter_apps_allowed_to_access_tailscale">Filter what apps are allowed to access Tailscale.</string>
     <string name="selected_apps_will_access_the_internet_directly_without_using_tailscale">Apps you select will access the internet without using Tailscale.</string>

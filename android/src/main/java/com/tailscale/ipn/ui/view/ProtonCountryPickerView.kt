@@ -4,6 +4,7 @@ package com.tailscale.ipn.ui.view
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,8 +34,9 @@ import java.util.Locale
 
 /**
  * Lists ProtonVPN exit countries. Tapping a row auto-picks the fastest server in that country and
- * connects. The leading star toggles a favorite (favorites sort to the top); the trailing arrow
- * drills into the individual servers of that country.
+ * connects. The leading star toggles a favorite (favorites sort to the top); the leading play
+ * marks the country to auto-connect when the VPN starts; the trailing arrow drills into the
+ * individual servers of that country.
  */
 @Composable
 fun ProtonCountryPickerView(
@@ -44,6 +46,7 @@ fun ProtonCountryPickerView(
 ) {
   val countries by model.countries.collectAsState()
   val favorites by model.favorites.collectAsState()
+  val autoConnect by model.autoConnectCountry.collectAsState()
   val busy by model.busy.collectAsState()
 
   LaunchedEffect(Unit) {
@@ -70,6 +73,7 @@ fun ProtonCountryPickerView(
       LazyColumn(modifier = Modifier.padding(innerPadding)) {
         items(ordered, key = { it.code }) { country ->
           val isFav = favorites.contains(country.code)
+          val isAuto = autoConnect == country.code
           ListItem(
               modifier =
                   Modifier.clickable {
@@ -77,17 +81,29 @@ fun ProtonCountryPickerView(
                     backToProton()
                   },
               leadingContent = {
-                IconButton(onClick = { model.toggleFavorite(country.code) }) {
-                  Text(
-                      text = if (isFav) "★" else "☆", // ★ / ☆
-                      color =
-                          if (isFav) MaterialTheme.colorScheme.primary
-                          else MaterialTheme.colorScheme.onSurfaceVariant)
+                Row {
+                  IconButton(onClick = { model.toggleFavorite(country.code) }) {
+                    Text(
+                        text = if (isFav) "★" else "☆", // ★ / ☆
+                        color =
+                            if (isFav) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
+                  IconButton(onClick = { model.toggleAutoConnect(country.code) }) {
+                    Text(
+                        text = if (isAuto) "▶" else "▷", // auto-connect on start
+                        color =
+                            if (isAuto) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant)
+                  }
                 }
               },
               headlineContent = { Text(countryDisplayName(country.code)) },
               supportingContent = {
-                Text(stringResource(R.string.proton_server_count, country.count))
+                val count = stringResource(R.string.proton_server_count, country.count)
+                Text(
+                    if (isAuto) "$count · ${stringResource(R.string.proton_autoconnect_badge)}"
+                    else count)
               },
               trailingContent = {
                 IconButton(onClick = { onNavigateToServers(country.code) }) {

@@ -184,6 +184,9 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 	var (
 		cfg   configPair
 		state ipn.State
+		// protonAutoTried records that Proton's auto-connect already fired for the
+		// current VPN-up session, so it triggers once per start (reset on shutdown).
+		protonAutoTried bool
 	)
 
 	stateCh := make(chan ipn.State)
@@ -206,6 +209,17 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 					a.closeVpnService(err, b)
 				}
 			}
+				// ProtonVPN auto-connect: once the tunnel is fully up, bring Proton
+				// up to the marked country (if any), once per VPN-up session. Reset
+				// when the VPN goes back down so a later restart re-triggers.
+				if state == ipn.Running {
+					if !protonAutoTried {
+						protonAutoTried = true
+						protonMaybeAutoConnect()
+					}
+				} else if state < ipn.Starting {
+					protonAutoTried = false
+				}
 		case c := <-configs:
 			cfg = c
 			if vpnService.service == nil || !b.isConfigNonNilAndDifferent(cfg.rcfg, cfg.dcfg) {

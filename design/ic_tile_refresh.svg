@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 60 60" color="#54514D">
+  <!-- Change-server tile (v2). Same L of 5 dots, plus a clean circular-refresh
+       arrow (open ring + solid triangular arrowhead) in the freed corner.
+       color sets currentColor; Android tints it on the tile. -->
+  <g fill="currentColor">
+    <circle cx="15" cy="15" r="5"/>
+    <circle cx="30" cy="15" r="5"/>
+    <circle cx="45" cy="15" r="5"/>
+    <circle cx="15" cy="30" r="5"/>
+    <circle cx="15" cy="45" r="5"/>
+  </g>
+  <path d="M43.8 31.1 A9 9 0 1 1 32.2 31.1" fill="none" stroke="currentColor"
+        stroke-width="4" stroke-linecap="round"/>
+  <path d="M40.1 28 L47.5 29 L42.4 35.2 Z" fill="currentColor" stroke="currentColor"
+        stroke-width="3" stroke-linejoin="round"/>
+</svg>

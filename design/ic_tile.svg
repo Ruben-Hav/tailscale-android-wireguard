@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 60 60">
+  <!-- Tailscale 3x3 dot grid. Faithful SVG of res/drawable/ic_tile.xml.
+       Lit dots = #FFFDFA (off-white), unlit dots = #54514D (grey).
+       Grid centers at x/y = 15, 30, 45 on a 60x60 canvas; each dot r=5. -->
+
+  <!-- Top row: all unlit -->
+  <circle cx="15" cy="15" r="5" fill="#54514D"/>
+  <circle cx="30" cy="15" r="5" fill="#54514D"/>
+  <circle cx="45" cy="15" r="5" fill="#54514D"/>
+
+  <!-- Middle row: all lit -->
+  <circle cx="15" cy="30" r="5" fill="#FFFDFA"/>
+  <circle cx="30" cy="30" r="5" fill="#FFFDFA"/>
+  <circle cx="45" cy="30" r="5" fill="#FFFDFA"/>
+
+  <!-- Bottom row: lit center, unlit corners -->
+  <circle cx="15" cy="45" r="5" fill="#54514D"/>
+  <circle cx="30" cy="45" r="5" fill="#FFFDFA"/>
+  <circle cx="45" cy="45" r="5" fill="#54514D"/>
+</svg>

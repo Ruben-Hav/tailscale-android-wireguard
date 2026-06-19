@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
@@ -166,6 +167,8 @@ private fun ConnectedSection(model: ProtonViewModel, onNavigateToCountries: () -
     Text(stringResource(R.string.proton_disconnect))
   }
   Spacer(Modifier.height(24.dp))
+  AutoConnectSection(model)
+  Spacer(Modifier.height(24.dp))
   CustomDnsSection(model)
   Spacer(Modifier.height(16.dp))
   TextButton(onClick = { model.logout() }) { Text(stringResource(R.string.proton_logout)) }
@@ -215,4 +218,33 @@ private fun CustomDnsSection(model: ProtonViewModel) {
   Button(onClick = { model.setCustomDns(dns.trim()) }, enabled = dns.trim() != savedDns) {
     Text(stringResource(R.string.proton_dns_apply))
   }
+}
+
+@Composable
+private fun AutoConnectSection(model: ProtonViewModel) {
+  val auto by model.autoConnectCountry.collectAsState()
+
+  Text(
+      stringResource(R.string.proton_autoconnect_title),
+      style = MaterialTheme.typography.titleMedium)
+  Spacer(Modifier.height(4.dp))
+  if (auto.isEmpty()) {
+    Text(
+        stringResource(R.string.proton_autoconnect_off_hint),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+  } else {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+      Text(countryName(auto), style = MaterialTheme.typography.bodyMedium)
+      Spacer(Modifier.weight(1f))
+      TextButton(onClick = { model.toggleAutoConnect(auto) }) {
+        Text(stringResource(R.string.proton_autoconnect_clear))
+      }
+    }
+  }
+}
+
+private fun countryName(code: String): String {
+  val n = java.util.Locale("", code).displayCountry
+  return if (n.isBlank() || n == code) code else n
 }

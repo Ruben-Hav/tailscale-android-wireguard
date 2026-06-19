@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 60 60" color="#54514D">
+  <!-- Protonscale toggle tile (v2). L of 5 dots (top row + left column) with a
+       rounded checkmark in the freed bottom-right corner. color sets
+       currentColor; Android tints it on the tile. -->
+  <g fill="currentColor">
+    <circle cx="15" cy="15" r="5"/>
+    <circle cx="30" cy="15" r="5"/>
+    <circle cx="45" cy="15" r="5"/>
+    <circle cx="15" cy="30" r="5"/>
+    <circle cx="15" cy="45" r="5"/>
+  </g>
+  <path d="M27 38.5 L33.5 46 L46.8 30" fill="none" stroke="currentColor"
+        stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

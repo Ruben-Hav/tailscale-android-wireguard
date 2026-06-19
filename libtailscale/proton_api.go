@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	srp "github.com/ProtonMail/go-srp"
@@ -179,27 +180,139 @@ func (a *protonAPI) loadPref(key string) string {
 	return s
 }
 
-func newProtonAPI() *protonAPI {
-	// Android's Go runtime has no /etc/resolv.conf, so the default resolver
-	// can't look up any hostname ("no such host"). Resolve via a known public
-	// DNS server directly (dialing an IP needs no prior lookup).
-	resolver := &net.Resolver{
-		PreferGo: true,
-		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			var d net.Dialer
-			c, err := d.DialContext(ctx, "udp", "1.1.1.1:53")
-			if err != nil {
-				c, err = d.DialContext(ctx, "udp", "8.8.8.8:53")
-			}
-			return c, err
-		},
+// protectControl protects a socket so it bypasses the VPN tunnel and exits via
+// the underlay. Used for every Proton control-plane socket: once ProtonVPN is
+// connected it captures the default route, so an unprotected API or DNS socket
+// loops back into the tunnel (or onto Tailscale) and times out.
+func protectControl(network, address string, c syscall.RawConn) error {
+	return c.Control(func(fd uintptr) { protectSocket(int(fd)) })
+}
+
+// dnsResolvers are queried concurrently for each lookup; the first to answer
+// wins, so one blocked or slow resolver never stalls (or fails) a request.
+var dnsResolvers = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
+
+type dnsCacheEntry struct {
+	ip      string
+	expires time.Time
+}
+
+var (
+	dnsCacheMu sync.Mutex
+	dnsCache   = map[string]dnsCacheEntry{}
+)
+
+const dnsCacheTTL = 5 * time.Minute
+
+func dnsCacheInvalidate(host string) {
+	dnsCacheMu.Lock()
+	delete(dnsCache, host)
+	dnsCacheMu.Unlock()
+}
+
+// resolveProtonHost resolves host to an IP, racing several public DNS servers
+// (each over a VPN-protected socket) and caching the result. This makes the
+// control plane resilient to a single resolver being slow or blocked, and avoids
+// re-resolving on every "switch server" (which previously timed out
+// intermittently). Android's Go runtime has no /etc/resolv.conf, so we must
+// supply the servers ourselves.
+func resolveProtonHost(ctx context.Context, host string) (string, error) {
+	if net.ParseIP(host) != nil {
+		return host, nil // already a literal IP
 	}
-	dialer := &net.Dialer{Timeout: 15 * time.Second, Resolver: resolver}
+	dnsCacheMu.Lock()
+	if e, ok := dnsCache[host]; ok && time.Now().Before(e.expires) {
+		dnsCacheMu.Unlock()
+		return e.ip, nil
+	}
+	dnsCacheMu.Unlock()
+
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	type result struct {
+		ip  string
+		err error
+	}
+	results := make(chan result, len(dnsResolvers))
+	for _, server := range dnsResolvers {
+		go func(server string) {
+			r := &net.Resolver{
+				PreferGo: true,
+				Dial: func(c context.Context, network, _ string) (net.Conn, error) {
+					d := net.Dialer{Control: protectControl}
+					return d.DialContext(c, "udp", server)
+				},
+			}
+			ips, err := r.LookupIPAddr(cctx, host)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			for _, a := range ips { // prefer IPv4
+				if a.IP.To4() != nil {
+					results <- result{ip: a.IP.String()}
+					return
+				}
+			}
+			if len(ips) > 0 {
+				results <- result{ip: ips[0].IP.String()}
+				return
+			}
+			results <- result{err: fmt.Errorf("no addresses for %s", host)}
+		}(server)
+	}
+	var lastErr error
+	for range dnsResolvers {
+		select {
+		case <-cctx.Done():
+			return "", cctx.Err()
+		case res := <-results:
+			if res.err == nil && res.ip != "" {
+				dnsCacheMu.Lock()
+				dnsCache[host] = dnsCacheEntry{ip: res.ip, expires: time.Now().Add(dnsCacheTTL)}
+				dnsCacheMu.Unlock()
+				return res.ip, nil
+			}
+			lastErr = res.err
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("could not resolve %s", host)
+	}
+	return "", lastErr
+}
+
+func newProtonAPI() *protonAPI {
+	// Resolve (cached, multi-resolver) then dial the IP directly — all over
+	// protected sockets. TLS still uses the request's hostname for SNI/cert
+	// validation, so dialing an IP is safe.
+	dialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		d := net.Dialer{Timeout: 15 * time.Second, Control: protectControl}
+		ip, err := resolveProtonHost(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", host, err)
+		}
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
+		if err != nil {
+			// A cached IP may have gone stale (Proton rotates its LB). Drop it and
+			// re-resolve once before giving up.
+			dnsCacheInvalidate(host)
+			if ip2, e2 := resolveProtonHost(ctx, host); e2 == nil && ip2 != ip {
+				return d.DialContext(ctx, network, net.JoinHostPort(ip2, port))
+			}
+			return nil, err
+		}
+		return conn, nil
+	}
 	return &protonAPI{
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				DialContext:       dialer.DialContext,
+				DialContext:       dialContext,
 				ForceAttemptHTTP2: true,
 			},
 		},

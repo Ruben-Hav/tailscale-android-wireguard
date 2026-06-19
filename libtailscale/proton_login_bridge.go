@@ -210,6 +210,41 @@ func ProtonFastestInCountry() error {
 	return connectToLogical(ls, dom)
 }
 
+// ProtonConnectFresh connects Proton to the fastest server, preferring one that
+// isn't the server we were last on (a fresh IP each time the Exit-node tile is
+// toggled on). It stays within the armed auto-connect country if one is set,
+// otherwise picks the fastest server anywhere.
+func ProtonConnectFresh() error {
+	logicals, maxTier, err := protonLogicals()
+	if err != nil {
+		return err
+	}
+	country := ProtonGetAutoConnectCountry()
+	last := protonMgr.lastConnLogicalID()
+	inScope := func(l *logicalServer) bool {
+		if country != "" {
+			return l.ExitCountry == country
+		}
+		return l.ExitCountry != ""
+	}
+	// First try to land on a different server than last time.
+	ls, dom := pickBest(logicals, maxTier, func(l *logicalServer) bool {
+		return l.ID != last && inScope(l)
+	})
+	if dom == nil {
+		// Only the previous server qualifies (or it's the sole option) — allow it.
+		ls, dom = pickBest(logicals, maxTier, inScope)
+	}
+	if dom == nil {
+		if country != "" {
+			return fmt.Errorf("proton: no available server in %s", country)
+		}
+		return errors.New("proton: no server available")
+	}
+	log.Printf("proton: exit-node connect -> %s (%s)", ls.ExitCountry, ls.Name)
+	return connectToLogical(ls, dom)
+}
+
 // ProtonCurrentServer returns the connected server as JSON {name, country, load}
 // ("{}" when not connected), for the UI's connected-server status line.
 func ProtonCurrentServer() string {

@@ -106,6 +106,11 @@ type protonManager struct {
 	curServerName string
 	curServerLoad int
 	curEntryIP    string
+
+	// lastLogicalID is the server we were most recently connected to (captured on
+	// disconnect), so the Exit-node tile can connect to a *different* server next
+	// time ("never the previous server").
+	lastLogicalID string
 }
 
 var protonMgr = &protonManager{}
@@ -134,8 +139,19 @@ func (m *protonManager) currentEntryIP() string {
 	return m.curEntryIP
 }
 
+// lastConnLogicalID returns the most recently connected server's logical ID, so
+// the next connect can avoid reconnecting to the same node.
+func (m *protonManager) lastConnLogicalID() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastLogicalID
+}
+
 func (m *protonManager) clearCurrentConn() {
 	m.mu.Lock()
+	if m.curLogicalID != "" {
+		m.lastLogicalID = m.curLogicalID
+	}
 	m.curLogicalID = ""
 	m.curCountry = ""
 	m.curServerName = ""

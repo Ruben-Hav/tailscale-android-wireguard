@@ -71,6 +71,10 @@ object ProtonBridge : ProtonStatusReceiver {
   private val _servers = MutableStateFlow<List<ProtonServer>>(emptyList())
   val servers: StateFlow<List<ProtonServer>> = _servers
 
+  // Country code marked to auto-connect when the VPN starts ("" = off).
+  private val _autoConnectCountry = MutableStateFlow("")
+  val autoConnectCountry: StateFlow<String> = _autoConnectCountry
+
   // Connected server name + (connect-time) load %, and the latest ping result.
   private val _connectedServerName = MutableStateFlow("")
   val connectedServerName: StateFlow<String> = _connectedServerName
@@ -100,6 +104,7 @@ object ProtonBridge : ProtonStatusReceiver {
     refreshLoginState()
     loadCustomDns()
     loadFavorites()
+    loadAutoConnect()
   }
 
   // --- Favorites (country codes; persisted in Go, UI-only) ---
@@ -126,6 +131,31 @@ object ProtonBridge : ProtonStatusReceiver {
     } catch (e: Exception) {
       // best effort
     }
+  }
+
+  // --- Auto-connect country (persisted in Go; armed per-country in the picker) ---
+
+  fun loadAutoConnect() {
+    _autoConnectCountry.value =
+        try {
+          Libtailscale.protonGetAutoConnectCountry()
+        } catch (e: Exception) {
+          ""
+        }
+  }
+
+  fun setAutoConnect(code: String) {
+    try {
+      Libtailscale.protonSetAutoConnectCountry(code)
+      _autoConnectCountry.value = code
+    } catch (e: Exception) {
+      // best effort
+    }
+  }
+
+  /** Marks code for auto-connect, or clears it if it's already the marked one. */
+  fun toggleAutoConnect(code: String) {
+    setAutoConnect(if (_autoConnectCountry.value == code) "" else code)
   }
 
   // --- Individual servers in a country ---
@@ -203,16 +233,39 @@ object ProtonBridge : ProtonStatusReceiver {
     }
   }
 
-  // tileActive / fastestInCountryFromTile are called from the Quick Settings tile
-  // (ProtonQuickServerTileService), which has no ViewModel/coroutine scope.
+  // tileActive / tileServerLabel and the Exit-node tile actions are called from the
+  // Quick Settings tile (ProtonQuickServerTileService), which has no ViewModel /
+  // coroutine scope, so they run their Libtailscale calls on a plain Thread.
   fun tileActive(): Boolean = _state.value == "Connected"
 
-  fun fastestInCountryFromTile() {
+  /** "NL#42 · 35%" for the tile subtitle, or "" if the server isn't known yet. */
+  fun tileServerLabel(): String {
+    val name = _connectedServerName.value
+    return if (name.isEmpty()) "" else "$name · ${_connectedLoad.value}%"
+  }
+
+  /** Exit-node tile: connect Proton to a fresh server (the tunnel is already up). */
+  fun connectFreshFromTile() {
+    _error.value = null
+    _state.value = "Connecting"
     Thread {
           try {
-            Libtailscale.protonFastestInCountry()
+            Libtailscale.protonConnectFresh()
           } catch (e: Exception) {
-            _error.value = "Couldn't switch server: ${e.message}"
+            _state.value = "Disconnected"
+            _error.value = "Couldn't connect: ${e.message}"
+          }
+        }
+        .start()
+  }
+
+  /** Exit-node tile: disconnect Proton (the Tailscale tunnel stays up). */
+  fun exitNodeOff() {
+    Thread {
+          try {
+            Libtailscale.protonDisconnect()
+          } catch (e: Exception) {
+            _error.value = "Disconnect failed: ${e.message}"
           }
         }
         .start()
@@ -429,6 +482,7 @@ class ProtonViewModel : ViewModel() {
   val connectedCountry: StateFlow<String> = ProtonBridge.connectedCountry
   val favorites: StateFlow<Set<String>> = ProtonBridge.favorites
   val servers: StateFlow<List<ProtonServer>> = ProtonBridge.servers
+  val autoConnectCountry: StateFlow<String> = ProtonBridge.autoConnectCountry
   val connectedServerName: StateFlow<String> = ProtonBridge.connectedServerName
   val connectedLoad: StateFlow<Int> = ProtonBridge.connectedLoad
   val pingResult: StateFlow<String> = ProtonBridge.pingResult
@@ -437,6 +491,7 @@ class ProtonViewModel : ViewModel() {
     viewModelScope.launch(Dispatchers.IO) {
       ProtonBridge.loadCustomDns()
       ProtonBridge.loadFavorites()
+      ProtonBridge.loadAutoConnect()
       ProtonBridge.refreshCurrentServer()
     }
   }
@@ -477,6 +532,10 @@ class ProtonViewModel : ViewModel() {
 
   fun toggleFavorite(code: String) {
     viewModelScope.launch(Dispatchers.IO) { ProtonBridge.toggleFavorite(code) }
+  }
+
+  fun toggleAutoConnect(code: String) {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.toggleAutoConnect(code) }
   }
 
   fun loadServers(countryCode: String) {
