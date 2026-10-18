@@ -18,8 +18,11 @@ package libtailscale
 import (
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
@@ -34,14 +37,18 @@ type protonConfig struct {
 	keepalive     int    // persistent keepalive seconds (0 -> 25)
 }
 
-// protonDevice owns the ProtonVPN wireguard-go device.
+// protonDevice owns the ProtonVPN wireguard-go device and its TUN. The TUN
+// survives Android VpnService reconfigures, but never a WireGuard device close.
 type protonDevice struct {
 	mu  sync.Mutex
 	tun *protonTUN
 	dev *device.Device
 }
 
-func newProtonDevice(ptun *protonTUN, cfg protonConfig) (*protonDevice, error) {
+func newProtonDevice(mtu int, cfg protonConfig) (*protonDevice, error) {
+	// Device.Close also closes its TUN. Reusing that TUN for another device
+	// makes its reader immediately return os.ErrClosed and close the new device.
+	ptun := newProtonTUN(mtu)
 	bind := conn.NewStdNetBind()
 	logger := device.NewLogger(device.LogLevelError, "proton-wg: ")
 	dev := device.NewDevice(ptun, bind, logger)
@@ -118,7 +125,9 @@ func protectPeek(name string, peek func() (int, error)) (protected bool) {
 		return false
 	}
 	if fd > 0 {
-		protectSocket(fd)
+		if !protectSocket(fd) {
+			return false
+		}
 		log.Printf("proton: protected %s socket fd %d", name, fd)
 		return true
 	}
@@ -148,13 +157,39 @@ func (p *protonDevice) Close() {
 	}
 }
 
-// protectSocket asks the active VpnService to exclude fd from the TUN.
-func protectSocket(fd int) {
-	if vpnService == nil || vpnService.service == nil {
-		log.Printf("proton: no active VpnService to protect fd %d", fd)
-		return
-	}
-	if !vpnService.service.Protect(int32(fd)) {
-		log.Printf("proton: VpnService.protect(%d) returned false", fd)
+// waitForHandshake verifies the peer rather than treating Device.Up as a
+// successful connection. Closing or replacing the device cancels the wait.
+func (p *protonDevice) waitForHandshake(timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		p.mu.Lock()
+		if p.dev == nil {
+			p.mu.Unlock()
+			return os.ErrClosed
+		}
+		state, err := p.dev.IpcGet()
+		p.mu.Unlock()
+		if err != nil {
+			return fmt.Errorf("proton: read handshake status: %w", err)
+		}
+		// The IPC response contains private keys; only inspect the timestamp and
+		// never include the response in logs or errors.
+		for line := range strings.SplitSeq(state, "\n") {
+			if value, ok := strings.CutPrefix(line, "last_handshake_time_sec="); ok {
+				if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
+					return nil
+				}
+			}
+		}
+		select {
+		case <-p.tun.closeCh:
+			return os.ErrClosed
+		case <-timer.C:
+			return fmt.Errorf("proton: WireGuard handshake timed out after %s", timeout)
+		case <-ticker.C:
+		}
 	}
 }

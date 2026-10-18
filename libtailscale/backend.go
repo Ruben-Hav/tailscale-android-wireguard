@@ -209,17 +209,17 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 					a.closeVpnService(err, b)
 				}
 			}
-				// ProtonVPN auto-connect: once the tunnel is fully up, bring Proton
-				// up to the marked country (if any), once per VPN-up session. Reset
-				// when the VPN goes back down so a later restart re-triggers.
-				if state == ipn.Running {
-					if !protonAutoTried {
-						protonAutoTried = true
-						protonMaybeAutoConnect()
-					}
-				} else if state < ipn.Starting {
-					protonAutoTried = false
+			// ProtonVPN auto-connect: once the tunnel is fully up, bring Proton
+			// up to the marked country (if any), once per VPN-up session. Reset
+			// when the VPN goes back down so a later restart re-triggers.
+			if state == ipn.Running {
+				if !protonAutoTried {
+					protonAutoTried = true
+					protonMaybeAutoConnect()
 				}
+			} else if state < ipn.Starting {
+				protonAutoTried = false
+			}
 		case c := <-configs:
 			cfg = c
 			if vpnService.service == nil || !b.isConfigNonNilAndDifferent(cfg.rcfg, cfg.dcfg) {
@@ -291,6 +291,8 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 			req.reply <- b.protonConnect(req.params)
 		case <-onProtonDisconnect:
 			b.protonDisconnect()
+		case result := <-onProtonHandshake:
+			protonMgr.handshakeFinished(result)
 		case r := <-onProtonReceiver:
 			protonMgr.mu.Lock()
 			protonMgr.receiver = r

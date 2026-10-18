@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	agent "github.com/ProtonVPN/go-vpn-lib/localAgent"
 	"github.com/gaissmai/bart"
@@ -101,8 +102,8 @@ type protonManager struct {
 	// server and its exit country, for the "fastest" quick actions. curServerName
 	// / curServerLoad / curEntryIP are shown in the UI and used by the latency
 	// probe. All guarded by mu.
-	curLogicalID string
-	curCountry   string
+	curLogicalID  string
+	curCountry    string
 	curServerName string
 	curServerLoad int
 	curEntryIP    string
@@ -217,11 +218,17 @@ type protonConnectRequest struct {
 	reply  chan error
 }
 
+type protonHandshakeResult struct {
+	dev *protonDevice
+	err error
+}
+
 var (
 	onProtonConnect    = make(chan protonConnectRequest)
 	onProtonDisconnect = make(chan struct{}, 1)
 	onProtonReceiver   = make(chan ProtonStatusReceiver, 1)
 	onProtonRefresh    = make(chan struct{}, 1) // re-apply the TUN (e.g. custom DNS changed)
+	onProtonHandshake  = make(chan protonHandshakeResult, 1)
 )
 
 // --- Exported gomobile bridge functions (callable from Kotlin) ---
@@ -358,27 +365,24 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 	protonMgr.mu.Unlock()
 	if alreadyUp {
 		log.Printf("proton: already connected to this config; ignoring duplicate connect")
-		protonMgr.ready.Store(true)
-		protonMgr.notifyState("Connected")
 		return nil
 	}
 
-	// Tear down any previous device/agent (reuse the persistent TUN).
+	// Stop forwarding while replacing the device. Each WireGuard device owns
+	// a fresh TUN; only Android VpnService reconfigures reuse that live TUN.
+	protonMgr.ready.Store(false)
 	protonMgr.teardownDevice()
-	if protonMgr.tun == nil {
-		protonMgr.tun = newProtonTUN(defaultMTU)
-	}
 
 	protonMgr.enabled.Store(true)
-	protonMgr.ready.Store(false)
 
-	dev, err := newProtonDevice(protonMgr.tun, cfg)
+	dev, err := newProtonDevice(defaultMTU, cfg)
 	if err != nil {
 		protonMgr.enabled.Store(false)
 		return err
 	}
 	protonMgr.mu.Lock()
 	protonMgr.dev = dev
+	protonMgr.tun = dev.tun
 	protonMgr.cfg = cfg
 	protonMgr.curLogicalID = p.logicalID
 	protonMgr.curCountry = p.country
@@ -390,16 +394,11 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 	// Re-run updateTUN to install the demux and capture the default route.
 	b.refreshTUN()
 
-	// Data-plane up == ready. If we start the local agent, it will flip the
-	// state to Connected once its in-tunnel TLS session is up; otherwise (manual
-	// connect, or dynamic connect without an agent host) report Connected now.
+	// Allow encrypted traffic so the handshake/agent can complete, but keep
+	// the UI Connecting until the peer has actually responded.
 	willStartAgent := !manual && p.certPEM != "" && p.agentHost != ""
 	protonMgr.ready.Store(true)
-	if willStartAgent {
-		protonMgr.notifyState("Connecting")
-	} else {
-		protonMgr.notifyState("Connected")
-	}
+	protonMgr.notifyState("Connecting")
 
 	// Start the in-tunnel local agent (v1 scope) when an agent host is provided.
 	if willStartAgent {
@@ -412,11 +411,21 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 		}, protonMgr.agentCallbacks(), true)
 		if aerr != nil {
 			log.Printf("proton: local agent start failed: %v", aerr)
+			b.protonDisconnect()
+			return fmt.Errorf("proton: local agent start: %w", aerr)
 		} else {
 			protonMgr.mu.Lock()
 			protonMgr.agent = ag
 			protonMgr.mu.Unlock()
 		}
+	} else {
+		go func() {
+			result := protonHandshakeResult{dev: dev, err: dev.waitForHandshake(15 * time.Second)}
+			select {
+			case onProtonHandshake <- result:
+			case <-dev.tun.closeCh:
+			}
+		}()
 	}
 	return nil
 }
@@ -457,11 +466,12 @@ func (b *backend) refreshTUN() {
 	}
 }
 
-// teardownDevice closes the current agent + device but keeps the persistent TUN.
+// teardownDevice closes the current agent, device, and device-owned TUN.
 func (m *protonManager) teardownDevice() {
 	m.mu.Lock()
 	ag, dev := m.agent, m.dev
 	m.agent, m.dev = nil, nil
+	m.tun = nil
 	m.mu.Unlock()
 	if ag != nil {
 		ag.Close()
@@ -469,6 +479,23 @@ func (m *protonManager) teardownDevice() {
 	if dev != nil {
 		dev.Close()
 	}
+}
+
+// handshakeFinished runs on the backend loop so a replaced device can never
+// overwrite the new connection's state with a late success or timeout.
+func (m *protonManager) handshakeFinished(result protonHandshakeResult) {
+	if m.currentDevice() != result.dev || !m.enabled.Load() {
+		return
+	}
+	if result.err != nil {
+		m.ready.Store(false)
+		log.Printf("proton: connection failed: %v", result.err)
+		m.notifyState("Disconnected")
+		m.notifyError(0, result.err.Error())
+		return
+	}
+	log.Printf("proton: WireGuard handshake complete")
+	m.notifyState("Connected")
 }
 
 // agentCallbacks maps local-agent events to readiness + UI notifications.

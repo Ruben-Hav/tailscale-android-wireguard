@@ -32,6 +32,9 @@ tailscale.jks
 # the debug signer is stable across container runs).
 .android-docker
 
+# Local build dependencies and signing material (never commit).
+.proton-build/
+
 # Java profiling output
 *.hprof
 

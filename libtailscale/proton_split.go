@@ -68,10 +68,10 @@ const (
 // (server/socket-protection issue). If out stays 0, app traffic never reaches
 // the demux (routing/TUN issue).
 var (
-	protonOutPackets   atomic.Int64 // app -> demux -> enqueued for Proton device
-	protonPulledByDev  atomic.Int64 // packets the Proton device pulled to encrypt+send
-	protonInPackets    atomic.Int64 // Proton device -> app (decrypted responses)
-	demuxDbgCount      atomic.Int64
+	protonOutPackets  atomic.Int64 // app -> demux -> enqueued for Proton device
+	protonPulledByDev atomic.Int64 // packets the Proton device pulled to encrypt+send
+	protonInPackets   atomic.Int64 // Proton device -> app (decrypted responses)
+	demuxDbgCount     atomic.Int64
 )
 
 func logEvery(n int64, format string, args ...any) {
@@ -245,14 +245,17 @@ func (p *protonTUN) Write(bufs [][]byte, offset int) (int, error) {
 	return e.write(bufs, offset)
 }
 
-func (p *protonTUN) MTU() (int, error)            { return p.mtu, nil }
-func (p *protonTUN) Name() (string, error)        { return "proton0", nil }
-func (p *protonTUN) Events() <-chan tun.Event     { return p.events }
-func (p *protonTUN) BatchSize() int               { return 1 }
-func (p *protonTUN) File() *os.File               { panic("protonTUN.File not available") }
+func (p *protonTUN) MTU() (int, error)        { return p.mtu, nil }
+func (p *protonTUN) Name() (string, error)    { return "proton0", nil }
+func (p *protonTUN) Events() <-chan tun.Event { return p.events }
+func (p *protonTUN) BatchSize() int           { return 1 }
+func (p *protonTUN) File() *os.File           { panic("protonTUN.File not available") }
 
 func (p *protonTUN) Close() error {
-	p.closeOnce.Do(func() { close(p.closeCh) })
+	p.closeOnce.Do(func() {
+		close(p.closeCh)
+		close(p.events)
+	})
 	return nil
 }
 
