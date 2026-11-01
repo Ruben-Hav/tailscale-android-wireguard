@@ -16,6 +16,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"tailscale.com/drive/driveimpl"
 	_ "tailscale.com/feature/condregister"
@@ -107,6 +108,17 @@ type backend struct {
 	lastCfg    *router.Config
 	lastDNSCfg *dns.OSConfig
 	netMon     *netmon.Monitor
+
+	// Serialized by runBackend, including delayed retries after Proton stops.
+	protonDisconnectPending  bool
+	protonDisconnectAttempts int
+	protonDisconnectTimer    *time.Timer
+	protonUnderlayGeneration uint64
+	protonUnderlayCancel     context.CancelFunc
+	protonUnderlayTimer      *time.Timer
+	protonUnderlayKey        string
+	protonUnderlayStarted    bool
+	protonUnderlayApplied    bool
 
 	logIDPublic logid.PublicID
 	logger      *logtail.Logger
@@ -291,6 +303,14 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 			req.reply <- b.protonConnect(req.params)
 		case <-onProtonDisconnect:
 			b.protonDisconnect()
+		case <-b.protonDisconnectRetryChan():
+			b.restoreAfterProtonDisconnect()
+		case <-onProtonUnderlayCheck:
+			b.startProtonUnderlayProbe(protonUnderlayForce.Swap(false))
+		case result := <-onProtonUnderlayResult:
+			b.protonUnderlayFinished(result)
+		case <-b.protonUnderlayRetryChan():
+			b.startProtonUnderlayProbe(true)
 		case result := <-onProtonHandshake:
 			protonMgr.handshakeFinished(result)
 		case r := <-onProtonReceiver:
@@ -299,7 +319,9 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 			protonMgr.mu.Unlock()
 		case <-onProtonRefresh:
 			// Re-apply the TUN so a custom-DNS change takes effect immediately.
-			b.refreshTUN()
+			if err := b.refreshTUN(); err != nil {
+				protonMgr.notifyError(0, fmt.Sprintf("Could not update VPN settings: %v", err))
+			}
 		}
 	}
 }
@@ -375,6 +397,7 @@ func (a *App) newBackend(dataDir string, appCtx AppContext, store *stateStore,
 		Metrics:        sys.UserMetricsRegistry(),
 		DriveForLocal:  driveimpl.NewFileSystemForLocal(logf),
 		EventBus:       sys.Bus.Get(),
+		ExtraRootCAs:   sys.ExtraRootCAs,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("runBackend: NewUserspaceEngine: %v", err)

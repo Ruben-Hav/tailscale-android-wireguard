@@ -23,14 +23,8 @@ param(
 $ErrorActionPreference = "Continue"
 
 # Must match DOCKER_IMAGE in the Makefile so we reuse the official build image.
-$Image   = "tailscale-android-build-amd64-041425-1"
+$Image   = "protonscale-android-build-20261030"
 $Android = $PSScriptRoot                              # ...\tailscale-android-wireguard
-$Root    = Split-Path $Android -Parent                # ...\tailscale-mobile-wireguard
-$Proton  = Join-Path $Root "proton"                   # ...\proton  (has go-vpn-lib)
-
-if (-not (Test-Path (Join-Path $Proton "go-vpn-lib"))) {
-    throw "Expected go-vpn-lib at $Proton\go-vpn-lib (the go.mod replace points to ../proton/go-vpn-lib)."
-}
 
 # Make sure Docker is up before we do anything slow.
 & docker version --format '{{.Server.Version}}' | Out-Null
@@ -47,11 +41,11 @@ if (-not (docker images -q $Image)) {
 
 # What to run inside the container.
 #   - mount the android repo at the path the Makefile expects (/build/tailscale-android)
-#   - ALSO mount ../proton so the go.mod replace (../proton/go-vpn-lib) resolves
+#   - Proton's Go library is pinned in go.mod and fetched automatically
 #   - persist the Go toolchain + module cache in named volumes across runs
 #   - persist the debug keystore so `adb install -r` works across rebuilds
 if ($Target -eq "apk") {
-    $make = "make tailscale-debug"
+    $make = "bash scripts/build-proton.sh"
     Write-Host "==> Building full debug APK..." -ForegroundColor Cyan
 } else {
     $make = "make libtailscale"
@@ -63,7 +57,6 @@ New-Item -ItemType Directory -Force -Path $androidDocker | Out-Null
 
 docker run --rm `
     -v "${Android}:/build/tailscale-android" `
-    -v "${Proton}:/build/proton" `
     -v "${androidDocker}:/root/.android" `
     -v "ts_android_gocache:/build/.cache" `
     -v "ts_android_gomod:/build/go" `

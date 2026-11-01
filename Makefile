@@ -10,7 +10,14 @@
 # with this name, it will be used.
 #
 # The convention here is tailscale-android-build-amd64-<date>
-DOCKER_IMAGE := tailscale-android-build-amd64-041425-1
+DOCKER_IMAGE := protonscale-android-build-20261030
+
+# The integration test image contains the Android emulator, system image, SDK,
+# build-tools, NDK, adb, and helper tools needed to run the emulator-backed Go
+# integration tests. Bump this tag when docker/Dockerfile.android-integration
+# or the required tool versions change, using:
+# tailscale-android-integration-amd64-YYYYMMDD-N
+ANDROID_INTEGRATION_DOCKER_IMAGE := tailscale-android-integration-amd64-20260912-1
 export TS_USE_TOOLCHAIN=1
 
 # If set, additional comma-separated build tags passed to the libtailscale Go
@@ -20,9 +27,27 @@ export TS_USE_TOOLCHAIN=1
 # affordances for debugging it.
 GOMOBILE_BUILD_TAGS := ts_omit_cachenetmap
 
+# Pull androidApiLevel from gradle.properties.
+ANDROID_API_LEVEL := $(shell grep '^androidApiLevel=' android/gradle.properties | cut -d'=' -f2)
+
+ifeq ($(ANDROID_API_LEVEL),)
+$(error androidApiLevel missing from android/gradle.properties)
+endif
+
+ANDROID_BUILD_TOOLS_VERSION := $(shell grep '^androidBuildToolsVersion=' android/gradle.properties | cut -d'=' -f2)
+
 DEBUG_APK := tailscale-debug.apk
 RELEASE_AAB := tailscale-release.aab
 RELEASE_TV_AAB := tailscale-tv-release.aab
+
+# Base Android versionCode for this make invocation. The value is minutes since
+# the Unix epoch, times 10; the final digit is reserved for the platform
+# (0 = phone/tablet, 1 = Android TV). An explicitly supplied value wins so the
+# outer builder can keep phone and TV on the same base.
+ifndef VERSION_CODE_BASE
+VERSION_CODE_BASE := $(shell echo $$(( $$(date +%s) / 60 * 10 )))
+endif
+export VERSION_CODE_BASE
 
 # Define output filenames.
 LIBTAILSCALE_AAR := android/libs/libtailscale.aar
@@ -40,7 +65,7 @@ else
     ANDROID_TOOLS_URL := "https://dl.google.com/android/repository/commandlinetools-mac-9477386_latest.zip"
     ANDROID_TOOLS_SUM := "2072ffce4f54cdc0e6d2074d2f381e7e579b7d63e915c220b96a7db95b2900ee  commandlinetools-mac-9477386_latest.zip"
 endif
-ANDROID_SDK_PACKAGES := 'platforms;android-34' 'extras;android;m2repository' 'ndk;23.1.7779620' 'platform-tools' 'build-tools;34.0.0'
+ANDROID_SDK_PACKAGES := 'platforms;android-$(ANDROID_API_LEVEL)' 'extras;android;m2repository' 'ndk;23.1.7779620' 'platform-tools' 'build-tools;$(ANDROID_BUILD_TOOLS_VERSION)'
 
 # Attempt to find an ANDROID_SDK_ROOT / ANDROID_HOME based either from
 # preexisting environment or common locations.
@@ -84,7 +109,7 @@ else
     export PATH := $(JAVA_HOME)/bin:$(PATH)
 endif
 
-AVD_BASE_IMAGE := "system-images;android-33;google_apis;"
+AVD_BASE_IMAGE := 'system-images;android-$(ANDROID_API_LEVEL);google_apis;'
 export HOST_ARCH := $(shell uname -m)
 ifeq ($(HOST_ARCH),aarch64)
     AVD_IMAGE := "$(AVD_BASE_IMAGE)arm64-v8a"
@@ -142,24 +167,33 @@ release-tv: jarsign-env $(RELEASE_TV_AAB)
 
 # gradle-dependencies groups together the android sources and libtailscale needed to assemble tests/debug/release builds.
 .PHONY: gradle-dependencies
-gradle-dependencies: $(shell find android -type f -not -path "android/build/*" -not -path '*/.*') $(LIBTAILSCALE_AAR) tailscale.version
+gradle-dependencies: $(shell find android -type f -not -path "android/build/*" -not -path "android/libs/*" -not -path '*/.*') $(LIBTAILSCALE_AAR) tailscale.version
 
 $(RELEASE_AAB): version gradle-dependencies
 	@echo "Building release AAB"
-	(cd android && ./gradlew test bundleRelease)
+	(cd android && ./gradlew test bundleRelease -PVERSION_CODE_BASE=$(VERSION_CODE_BASE))
 	install -C ./android/build/outputs/bundle/release/android-release.aab $@
 
+# PLATFORM=tv signals to Gradle that we should build for AndroidTV. Gradle
+# reserves the last digit of VERSION_CODE_BASE for the platform, so phone/tablet
+# builds use ...0 and TV builds use ...1.
 $(RELEASE_TV_AAB): version gradle-dependencies
 	@echo "Building TV release AAB"
-	(cd android && ./gradlew test bundleRelease_tv)
-	install -C ./android/build/outputs/bundle/release_tv/android-release_tv.aab $@
+	(cd android && ./gradlew test bundleRelease -PVERSION_CODE_BASE=$(VERSION_CODE_BASE) -PPLATFORM=tv)
+	install -C ./android/build/outputs/bundle/release/android-release.aab $@
 
 tailscale-test.apk: version gradle-dependencies
-	(cd android && ./gradlew assembleApplicationTestAndroidTest)
-	install -C ./android/build/outputs/apk/androidTest/applicationTest/android-applicationTest-androidTest.apk $@
+	(cd android && ./gradlew assembleDebugAndroidTest)
+	install -C ./android/build/outputs/apk/androidTest/debug/android-debug-androidTest.apk $@
+
+# Command that (re)generates tailscale.version from the current git HEAD and
+# go.mod state. VERSION_LONG's trailing -g<hash> is this repo's HEAD, so this
+# must be re-run after any commit that should be reflected in the version (see
+# tag_release / bumposs).
+MKVERSION := ./tool/go run tailscale.com/cmd/mkversion
 
 tailscale.version: go.mod go.sum go.toolchain.rev $(wildcard .git/HEAD)
-	@bash -c "./tool/go run tailscale.com/cmd/mkversion > tailscale.version"
+	@bash -c "$(MKVERSION) > tailscale.version"
 
 .PHONY: version
 version: tailscale.version
@@ -254,10 +288,10 @@ env:
 .PHONY: jarsign-env
 jarsign-env:
 ifeq ($(JKS_PATH),)
-	$(error JKS_PATH is not set.  export JKS_PATH=/path/to/tailcale.jks)
+	$(error JKS_PATH is not set.  export JKS_PATH=/path/to/tailscale.jks)
 endif
 ifeq ($(JKS_PASSWORD),)
-	$(error JKS_PASSWORD is not set.  export JKS_PASSWORD=passwordForTailcale.jks)
+	$(error JKS_PASSWORD is not set.  export JKS_PASSWORD=passwordForTailscale.jks)
 endif
 ifeq ($(wildcard $(JKS_PATH)),)
 	$(error JKS_PATH does not point to a file)
@@ -271,23 +305,33 @@ androidpath:
 	@echo 'export PATH=$(ANDROID_HOME)/cmdline-tools/latest/bin:$(ANDROID_HOME)/platform-tools:$$PATH'
 
 .PHONY: tag_release
-tag_release: debug-symbols tailscale.version ## Tag the current commit with the current version
+tag_release: tailscale.version ## Tag the current commit with the current version
 	source tailscale.version && git tag -a "$${VERSION_LONG}" -m "OSS and Version updated to $${VERSION_LONG}"
 
 .PHONY: bumposs ## Bump to the latest oss and update the versions.
 bumposs: update-oss tailscale.version
-	source tailscale.version && git commit -sm "android: bump OSS" -m "OSS and Version updated to $${VERSION_LONG}" go.toolchain.rev android/build.gradle go.mod go.sum
+	source tailscale.version && git commit -sm "android: bump OSS" -m "OSS and Version updated to $${VERSION_LONG}" go.toolchain.rev go.mod go.sum
+	@# Regenerate tailscale.version so VERSION_LONG's -g<hash> points at the
+	@# bump commit we just created, not its parent.
+	$(MKVERSION) > tailscale.version
 	source tailscale.version && git tag -a "$${VERSION_LONG}" -m "OSS and Version updated to $${VERSION_LONG}"
-
-.PHONY: bump_version_code ## Bump the version code in build.gradle
-bump_version_code:
-	sed -i'.bak' "s/versionCode .*/versionCode $$(expr $$(awk '/versionCode ([0-9]+)/{print $$2}' android/build.gradle) + 1)/" android/build.gradle && rm android/build.gradle.bak
 
 .PHONY: update-oss ## Update the tailscale.com go module
 update-oss:
 	curl -f https://raw.githubusercontent.com/tailscale/tailscale/refs/heads/main/go.toolchain.rev > go.toolchain.rev.new
 	mv go.toolchain.rev.new go.toolchain.rev
-	GOPROXY=direct ./tool/go get tailscale.com@main
+# Resolve main to a commit ourselves rather than asking the Go module
+# proxy for tailscale.com@main, because the proxy caches branch
+# resolution and often returns a stale commit. With an explicit commit
+# the proxy fetches it on demand, so both tailscale.com and all of its
+# dependencies come from the proxy rather than slow direct git clones.
+# If the proxy fails for some reason, fall back to fetching just
+# tailscale.com directly while still using the proxy for everything else.
+	REV=$$(git ls-remote https://github.com/tailscale/tailscale.git refs/heads/main | cut -f1) && \
+		test -n "$$REV" && \
+		echo "Updating tailscale.com to $$REV" && \
+		(./tool/go get tailscale.com@$$REV || \
+			GONOPROXY=tailscale.com ./tool/go get tailscale.com@$$REV)
 	./tool/go mod tidy -compat=1.24
 
 # Get the commandline tools package, this provides (among other things) the sdkmanager binary.
@@ -325,6 +369,10 @@ checkandroidsdk: ## Check that Android SDK is installed
 .PHONY: test
 test: gradle-dependencies ## Run the Android tests
 	(cd android && ./gradlew test)
+
+.PHONY: release-lint
+release-lint: gradle-dependencies ## Run release lint checks
+	(cd android && ./gradlew --no-daemon lintVitalRelease)
 
 .PHONY: fmt
 fmt: gradle-dependencies ## Format the Android code
@@ -365,6 +413,14 @@ docker-build-image: ## Builds the docker image for the android build environment
 		docker build -f docker/DockerFile.amd64-build -t $(DOCKER_IMAGE) .; \
 	fi
 
+.PHONY: docker-build-android-integration-image
+docker-build-android-integration-image: ## Build the Docker image used to run Android integration tests
+	@echo "Checking if docker image $(ANDROID_INTEGRATION_DOCKER_IMAGE) already exists..."
+	@if ! docker images $(ANDROID_INTEGRATION_DOCKER_IMAGE) -q | grep -q . ; then \
+		echo "Image does not exist. Building..."; \
+		docker build -f docker/Dockerfile.android-integration -t $(ANDROID_INTEGRATION_DOCKER_IMAGE) .; \
+	fi
+
 # DOCKER_ANDROID_DIR is bind-mounted as /root/.android inside the container
 # so the Gradle-generated debug keystore (and anything else under ~/.android)
 # persists across docker runs. Without this, every docker-based debug build
@@ -373,20 +429,42 @@ docker-build-image: ## Builds the docker image for the android build environment
 # JVM's user.home resolves to /root for the container's root user, regardless
 # of the Dockerfile's HOME=/build env.
 DOCKER_ANDROID_DIR := $(CURDIR)/.android-docker
+DOCKER_ANDROID_INTEGRATION_DIR := $(CURDIR)/.android-integration-docker
+DOCKER_GRADLE_DIR := $(CURDIR)/.gradle-docker
+DOCKER_GO_CACHE_DIR := $(CURDIR)/.cache-docker
 
 .PHONY: docker-android-dir
 docker-android-dir:
-	@mkdir -p $(DOCKER_ANDROID_DIR)
+	@mkdir -p $(DOCKER_ANDROID_DIR) $(DOCKER_GRADLE_DIR) $(DOCKER_GO_CACHE_DIR)
 
-DOCKER_RUN_VOLS := -v $(CURDIR):/build/tailscale-android -v $(DOCKER_ANDROID_DIR):/root/.android
+.PHONY: docker-android-integration-dir
+docker-android-integration-dir:
+	@mkdir -p $(DOCKER_ANDROID_INTEGRATION_DIR) $(DOCKER_GO_CACHE_DIR)
+
+DOCKER_RUN_VOLS := -v $(CURDIR):/build/tailscale-android -v $(DOCKER_ANDROID_DIR):/root/.android -v $(DOCKER_GRADLE_DIR):/build/.gradle -v $(DOCKER_GO_CACHE_DIR):/build/.cache --env GOPATH=/build/.cache/go --env GOMODCACHE=/build/.cache/go/pkg/mod
 
 .PHONY: docker-run-build
 docker-run-build: clean jarsign-env docker-build-image docker-android-dir ## Runs the docker image for the android build environment and builds release
-	@docker run --rm $(DOCKER_RUN_VOLS) --env JKS_PASSWORD=$(JKS_PASSWORD) --env JKS_PATH=$(JKS_PATH) $(DOCKER_IMAGE)
+	@docker run --rm $(DOCKER_RUN_VOLS) --env JKS_PASSWORD=$(JKS_PASSWORD) --env JKS_PATH=$(JKS_PATH) --env VERSION_CODE_BASE=$(VERSION_CODE_BASE) $(DOCKER_IMAGE)
 
 .PHONY: docker-tailscale-debug
 docker-tailscale-debug: docker-build-image docker-android-dir ## Build tailscale-debug.apk inside the docker env (stable signer across runs)
 	@docker run --rm $(DOCKER_RUN_VOLS) $(DOCKER_IMAGE) make tailscale-debug
+
+.PHONY: android-integration-test
+android-integration-test: docker-tailscale-debug android-integration-test-run ## Build APK and run adb-backed Android integration tests in Docker
+
+.PHONY: android-integration-test-run
+android-integration-test-run: docker-build-android-integration-image docker-android-integration-dir ## Run adb-backed Android integration tests in Docker using existing APK
+	@docker run --rm --device /dev/kvm \
+		-v $(CURDIR):/workspace \
+		-v $(DOCKER_ANDROID_INTEGRATION_DIR):/root/.android \
+		-v $(DOCKER_GO_CACHE_DIR):/root/.cache \
+		--env GOPATH=/root/.cache/go \
+		--env GOMODCACHE=/root/.cache/go/pkg/mod \
+		-w /workspace \
+		$(ANDROID_INTEGRATION_DOCKER_IMAGE) \
+		/usr/local/bin/run-android-integration-test /workspace/$(DEBUG_APK)
 
 .PHONY: docker-remove-build-image
 docker-remove-build-image: ## Removes the current docker build image

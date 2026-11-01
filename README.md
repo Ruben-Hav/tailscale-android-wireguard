@@ -1,5 +1,77 @@
 # Tailscale Android Client
 
+## Protonscale fork
+
+This fork combines Tailscale and Proton VPN in a single Android VPN service.
+The current base is stable Tailscale Android 1.104.4, with Proton API compatibility
+version 5.20.98.0. Proton's shared Go library is pinned in `go.mod`.
+
+VPN Accelerator is enabled by default for account-based Proton connections.
+The switch on the Proton VPN screen saves the setting for the next connection;
+disconnect and reconnect Proton VPN after changing it. The client explicitly
+requests Proton's `SplitTCP` certificate feature while retaining WireGuard UDP.
+Imported WireGuard configurations keep their original server-side settings.
+
+Account-based connections use Proton's IPv6 client address when the selected
+server advertises IPv6 support. IPv4-only servers return local ICMPv6 no-route
+errors, allowing clients to fall back promptly while IPv6 remains captured.
+IPv6 translation handles extension headers and quoted ICMPv6 path-MTU errors.
+
+When the physical network has IPv4 but both independent IPv6 reachability
+probes fail, tailnet-only mode returns immediate errors for public IPv6 instead
+of allowing long TCP timeouts after Proton disconnects. Working physical IPv6,
+tailnet/subnet routes, and IPv6 exit nodes retain their routes. Probes use
+protected, network-bound TCP connections, run on network changes/disconnect,
+and retry failed paths every three minutes while the VPN service is active.
+
+Build the debug APK for ARM64 phones and x86-64 emulators with Docker Desktop:
+
+```powershell
+.\proton-build.ps1 apk
+```
+
+The result is `tailscale-debug.apk`, package `com.tailscale.ipn.debug`, named
+Protonscale. Builds explicitly use `.android-docker/debug.keystore`. Retain that
+file: a different key prevents updating an existing installation in place.
+The key and generated APKs are ignored by Git.
+
+Run the focused routing and WireGuard reconnect tests inside the build environment:
+
+```sh
+bash scripts/test-proton-device.sh
+```
+
+Run the Accelerator certificate-request and saved-setting tests against a
+disposable Android emulator/device accessible to ADB from the build environment.
+This older suite replaces app data; do not use it with a saved real login:
+
+```sh
+ANDROID_SERIAL=emulator-5554 bash scripts/test-proton-accelerator.sh
+```
+
+The Proton packet queue reuses buffers up to 2 KiB and returns them after the
+WireGuard slab copy, a queue drop, or tunnel close. Larger packets use an
+unpooled fallback. Packet log formatting runs only when a message is emitted.
+
+Benchmark the queue handoff without an account or a running VPN:
+
+```sh
+./tool/go test -run '^$' -bench BenchmarkProton -benchmem \
+  libtailscale/proton_split.go libtailscale/proton_nat.go \
+  libtailscale/proton_trace_disabled.go libtailscale/proton_ipv6.go \
+  libtailscale/proton_underlay_probe.go \
+  libtailscale/proton_perf_test.go
+```
+
+`BenchmarkProtonForward` reports one packet per operation;
+`BenchmarkProtonPipeline` reports a batch of 64 packets exchanged by separate
+goroutines. These isolate queue/copy/logging overhead; use live transfers to
+measure whole-app performance.
+
+For headless connectivity checks and CPU/allocation/contention profiling using
+existing logins and a separate traffic-generator UID, see
+[the diagnostic harness](integration/proton-diagnostics/README.md).
+
 https://tailscale.com
 
 Private WireGuard® networks made easy
@@ -132,8 +204,11 @@ make install
 
 ## Building a release
 
-Use `make tag_release` to bump the Android version code, update the version
-name, and tag the current commit.
+Use `make tag_release` to stamp the Play Store version code, update the version
+name, and tag the current commit. The version code is derived from wall-clock
+time (minutes since the Unix epoch) at release time and committed into
+`android/build.gradle`, so it increases monotonically across all builds and
+branches while staying fixed for any given commit.
 
 We only guarantee to support the latest Go release and any Go beta or
 release candidate builds (currently Go 1.14) in module mode. It might

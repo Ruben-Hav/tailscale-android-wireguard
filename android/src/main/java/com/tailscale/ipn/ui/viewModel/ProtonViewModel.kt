@@ -95,6 +95,9 @@ object ProtonBridge : ProtonStatusReceiver {
   private val _customDns = MutableStateFlow("")
   val customDns: StateFlow<String> = _customDns
 
+  private val _acceleratorEnabled = MutableStateFlow(true)
+  val acceleratorEnabled: StateFlow<Boolean> = _acceleratorEnabled
+
   // Manual .conf fallback (debug).
   private val _config = MutableStateFlow("")
   val config: StateFlow<String> = _config
@@ -103,6 +106,7 @@ object ProtonBridge : ProtonStatusReceiver {
     Libtailscale.setProtonStatusReceiver(this)
     refreshLoginState()
     loadCustomDns()
+    loadAccelerator()
     loadFavorites()
     loadAutoConnect()
   }
@@ -273,6 +277,20 @@ object ProtonBridge : ProtonStatusReceiver {
 
   // --- Custom DNS (run on a background thread) ---
 
+  fun loadAccelerator() {
+    _acceleratorEnabled.value = Libtailscale.protonAcceleratorEnabled()
+  }
+
+  fun setAcceleratorEnabled(enabled: Boolean) {
+    try {
+      Libtailscale.protonSetAcceleratorEnabled(enabled)
+      _acceleratorEnabled.value = enabled
+      _error.value = null
+    } catch (e: Exception) {
+      _error.value = "Couldn't save VPN Accelerator: ${e.message}"
+    }
+  }
+
   fun loadCustomDns() {
     _customDns.value =
         try {
@@ -303,6 +321,9 @@ object ProtonBridge : ProtonStatusReceiver {
 
   // --- libtailscale.ProtonStatusReceiver (called from Go) ---
   override fun onProtonState(state: String) {
+    if (_state.value == "Disconnecting" && state == "Disconnected") {
+      _error.value = null
+    }
     _state.value = state
     refreshCurrentServer()
     // Reflect Proton's connection state on the Quick Settings tile.
@@ -479,6 +500,7 @@ class ProtonViewModel : ViewModel() {
   val needsCaptcha: StateFlow<Boolean> = ProtonBridge.needsCaptcha
   val captchaUrl: StateFlow<String> = ProtonBridge.captchaUrl
   val customDns: StateFlow<String> = ProtonBridge.customDns
+  val acceleratorEnabled: StateFlow<Boolean> = ProtonBridge.acceleratorEnabled
   val connectedCountry: StateFlow<String> = ProtonBridge.connectedCountry
   val favorites: StateFlow<Set<String>> = ProtonBridge.favorites
   val servers: StateFlow<List<ProtonServer>> = ProtonBridge.servers
@@ -490,6 +512,7 @@ class ProtonViewModel : ViewModel() {
   init {
     viewModelScope.launch(Dispatchers.IO) {
       ProtonBridge.loadCustomDns()
+      ProtonBridge.loadAccelerator()
       ProtonBridge.loadFavorites()
       ProtonBridge.loadAutoConnect()
       ProtonBridge.refreshCurrentServer()
@@ -500,6 +523,10 @@ class ProtonViewModel : ViewModel() {
 
   fun setCustomDns(value: String) {
     viewModelScope.launch(Dispatchers.IO) { ProtonBridge.setCustomDns(value) }
+  }
+
+  fun setAcceleratorEnabled(enabled: Boolean) {
+    viewModelScope.launch(Dispatchers.IO) { ProtonBridge.setAcceleratorEnabled(enabled) }
   }
 
   fun login(username: String, password: String) {

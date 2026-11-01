@@ -52,8 +52,8 @@ import (
 )
 
 const (
-	// maxPacketSize bounds a single IP packet we shuttle between tunnels.
-	// The Android TUN MTU is defaultMTU (1280); 2048 leaves ample margin.
+	// maxPacketSize bounds reusable packet buffers. The Android TUN MTU is
+	// defaultMTU (1280); larger packets still work but are not retained in the pool.
 	maxPacketSize = 2048
 
 	// protonQueueLen bounds how many diverted packets we buffer for the Proton
@@ -61,9 +61,30 @@ const (
 	protonQueueLen = 1024
 )
 
+// Always keep tailnet addresses on Tailscale, even before individual peer routes arrive.
+var tailscaleRanges = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
+}
+
+func buildTailnetTable(routes []netip.Prefix) *bart.Lite {
+	t := &bart.Lite{}
+	for _, p := range tailscaleRanges {
+		t.Insert(p)
+	}
+	for _, p := range routes {
+		if p.Bits() != 0 {
+			t.Insert(p)
+		}
+	}
+	return t
+}
+
 // Diagnostic packet counters for the Proton data path.
-//   protonOutPackets: app -> Proton (diverted by the demux)
-//   protonInPackets:  Proton -> app (decrypted, written back to the real TUN)
+//
+//	protonOutPackets: app -> Proton (diverted by the demux)
+//	protonInPackets:  Proton -> app (decrypted, written back to the real TUN)
+//
 // If out grows but in stays 0, packets reach Proton but nothing comes back
 // (server/socket-protection issue). If out stays 0, app traffic never reaches
 // the demux (routing/TUN issue).
@@ -74,9 +95,29 @@ var (
 	demuxDbgCount     atomic.Int64
 )
 
-func logEvery(n int64, format string, args ...any) {
-	if n == 1 || n%5000 == 0 {
-		log.Printf(format, args...)
+func shouldLogProtonPacket(n int64) bool { return n == 1 || n%5000 == 0 }
+
+// A pointer wrapper avoids allocating a slice header when returning a buffer to
+// sync.Pool. Each queued packet has one owner until Read copies it into the
+// WireGuard slab, or a drop/Close returns it to the pool.
+type protonPacket struct{ buf []byte }
+
+var protonPacketPool = sync.Pool{New: func() any {
+	return &protonPacket{buf: make([]byte, maxPacketSize)}
+}}
+
+func acquireProtonPacket(size int) *protonPacket {
+	if size > maxPacketSize {
+		return &protonPacket{buf: make([]byte, size)}
+	}
+	p := protonPacketPool.Get().(*protonPacket)
+	p.buf = p.buf[:size]
+	return p
+}
+
+func releaseProtonPacket(p *protonPacket) {
+	if cap(p.buf) == maxPacketSize {
+		protonPacketPool.Put(p)
 	}
 }
 
@@ -87,6 +128,7 @@ const (
 	routeDrop pxRoute = iota
 	routeTailscale
 	routeProton
+	routeRejectIPv6
 )
 
 func (r pxRoute) String() string {
@@ -95,6 +137,8 @@ func (r pxRoute) String() string {
 		return "tailscale"
 	case routeProton:
 		return "proton"
+	case routeRejectIPv6:
+		return "reject-ipv6"
 	default:
 		return "drop"
 	}
@@ -162,8 +206,12 @@ type protonTUN struct {
 
 	// inbound carries host->internet packets (diverted by demuxRouter) for the
 	// Proton device to Read and encrypt.
-	inbound chan []byte
+	inbound chan *protonPacket
 	events  chan tun.Event
+	// Serialize enqueue with Close so nothing can be queued after Close drains
+	// the buffers. Read owns dequeued buffers and needs no queue lock.
+	queueMu sync.Mutex
+	closed  bool
 
 	// writer points at the current real TUN, used to deliver internet->host
 	// packets the Proton device decrypted. Swapped on each reconfigure.
@@ -176,7 +224,7 @@ type protonTUN struct {
 func newProtonTUN(mtu int) *protonTUN {
 	p := &protonTUN{
 		mtu:     mtu,
-		inbound: make(chan []byte, protonQueueLen),
+		inbound: make(chan *protonPacket, protonQueueLen),
 		events:  make(chan tun.Event, 1),
 		closeCh: make(chan struct{}),
 	}
@@ -187,18 +235,29 @@ func newProtonTUN(mtu int) *protonTUN {
 // enqueue copies pkt and offers it to the Proton device, dropping if the queue
 // is full (TUN-like behaviour under pressure).
 func (p *protonTUN) enqueue(pkt []byte) {
+	if p.rejectUnsupportedIPv6(pkt) {
+		return
+	}
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+	if p.closed {
+		return
+	}
 	n := protonOutPackets.Add(1)
-	logEvery(n, "proton: app->Proton packets: %d (last dst %s)", n, packetDstString(pkt))
-	cp := make([]byte, len(pkt))
-	copy(cp, pkt)
+	if shouldLogProtonPacket(n) {
+		log.Printf("proton: app->Proton packets: %d (last dst %s)", n, packetDstString(pkt))
+	}
+	cp := acquireProtonPacket(len(pkt))
+	copy(cp.buf, pkt)
+	protonTracePacket("out-before-NAT", cp.buf)
 	// SNAT the source to the Proton-assigned client address so the server's
 	// cryptokey routing accepts the packet.
-	snatOutbound(cp)
+	snatOutbound(cp.buf)
+	protonTracePacket("out-after-NAT", cp.buf)
 	select {
 	case p.inbound <- cp:
-	case <-p.closeCh:
 	default:
-		// queue full: drop.
+		releaseProtonPacket(cp) // queue full: drop.
 	}
 }
 
@@ -212,13 +271,23 @@ func packetDstString(pkt []byte) string {
 func (p *protonTUN) setWriter(e *realEndpoint) { p.writer.Store(e) }
 
 // Read returns one host->internet packet for the Proton device to send.
-func (p *protonTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (p *protonTUN) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	if len(packets) == 0 || len(slab) < 2*tun.ReadPacketSpacing {
+		return 0, tun.ErrTooManySegments
+	}
 	select {
 	case pkt := <-p.inbound:
 		c := protonPulledByDev.Add(1)
-		logEvery(c, "proton: device pulled %d packets to encrypt+send", c)
-		n := copy(bufs[0][offset:], pkt)
-		sizes[0] = n
+		if shouldLogProtonPacket(c) {
+			log.Printf("proton: device pulled %d packets to encrypt+send", c)
+		}
+		if len(pkt.buf) > len(slab)-2*tun.ReadPacketSpacing {
+			releaseProtonPacket(pkt)
+			return 0, tun.ErrTooManySegments
+		}
+		n := copy(slab[tun.ReadPacketSpacing:], pkt.buf)
+		releaseProtonPacket(pkt)
+		packets[0] = tun.ReadPacket{Offset: tun.ReadPacketSpacing, Size: n}
 		return 1, nil
 	case <-p.closeCh:
 		return 0, os.ErrClosed
@@ -229,12 +298,16 @@ func (p *protonTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 // current real TUN.
 func (p *protonTUN) Write(bufs [][]byte, offset int) (int, error) {
 	n := protonInPackets.Add(int64(len(bufs)))
-	logEvery(n, "proton: Proton->app packets: %d", n)
+	if shouldLogProtonPacket(n) {
+		log.Printf("proton: Proton->app packets: %d", n)
+	}
 	// DNAT the destination from the Proton client address back to the device's
 	// TUN address so the app receives the response on the IP it sent from.
 	for _, b := range bufs {
 		if len(b) > offset {
+			protonTracePacket("in-before-NAT", b[offset:])
 			dnatInbound(b[offset:])
+			protonTracePacket("in-after-NAT", b[offset:])
 		}
 	}
 	e := p.writer.Load()
@@ -253,8 +326,19 @@ func (p *protonTUN) File() *os.File           { panic("protonTUN.File not availa
 
 func (p *protonTUN) Close() error {
 	p.closeOnce.Do(func() {
+		p.queueMu.Lock()
+		defer p.queueMu.Unlock()
+		p.closed = true
 		close(p.closeCh)
 		close(p.events)
+		for {
+			select {
+			case pkt := <-p.inbound:
+				releaseProtonPacket(pkt)
+			default:
+				return
+			}
+		}
 	})
 	return nil
 }
@@ -271,12 +355,8 @@ type demuxRouter struct {
 	// protonReady gates whether non-tailnet packets are forwarded (true) or
 	// dropped for the fail-closed kill switch (false).
 	protonReady *atomic.Bool
-
-	// scratch holds a single packet read from the real device. Only touched by
-	// the single multiTUN reader goroutine, so it needs no lock.
-	scratchBufs  [][]byte
-	scratchSizes []int
-	scratchOff   int
+	// Valid only in tailnet-only mode on a confirmed broken IPv6 underlay.
+	rejectIPv6From netip.Addr
 }
 
 func newDemuxRouter(ep *realEndpoint, proton *protonTUN, table *bart.Lite, ready *atomic.Bool) *demuxRouter {
@@ -301,6 +381,9 @@ func (d *demuxRouter) route(pkt []byte) pxRoute {
 			return routeTailscale
 		}
 	}
+	if d.rejectIPv6From.IsValid() && protonIPv6Internet.Contains(addr) {
+		return routeRejectIPv6
+	}
 	// LAN / link-local / multicast must never be tunneled to Proton (it can't
 	// route them and would just black-hole/flood). They're also excluded from
 	// the TUN, so this is a safety net.
@@ -318,27 +401,16 @@ func isNonRoutable(a netip.Addr) bool {
 		a.IsMulticast() || a.IsLoopback() || a.IsUnspecified()
 }
 
-func (d *demuxRouter) ensureScratch(offset int) {
-	if d.scratchBufs == nil || d.scratchOff != offset {
-		d.scratchBufs = [][]byte{make([]byte, offset+maxPacketSize)}
-		d.scratchSizes = []int{0}
-		d.scratchOff = offset
-	}
-}
-
 // Read returns tailnet packets to the Tailscale engine, diverting everything
 // else to Proton (or dropping it). It blocks until at least one tailnet packet
 // is available, mirroring normal TUN read semantics.
-func (d *demuxRouter) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
-	d.ensureScratch(offset)
+func (d *demuxRouter) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
 	for {
-		n, err := d.ep.real.Read(d.scratchBufs, d.scratchSizes, offset)
-		if err != nil {
-			return 0, err
-		}
+		n, err := d.ep.real.Read(slab, packets)
 		delivered := 0
 		for i := 0; i < n; i++ {
-			pkt := d.scratchBufs[i][offset : offset+d.scratchSizes[i]]
+			packet := packets[i]
+			pkt := slab[packet.Offset : packet.Offset+packet.Size]
 			decision := d.route(pkt)
 			if c := demuxDbgCount.Add(1); c <= 10 {
 				s, _ := srcAddr(pkt)
@@ -347,19 +419,20 @@ func (d *demuxRouter) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 			}
 			switch decision {
 			case routeTailscale:
-				if delivered < len(bufs) {
-					m := copy(bufs[delivered][offset:], pkt)
-					sizes[delivered] = m
-					delivered++
-				}
+				packets[delivered] = packet
+				delivered++
 			case routeProton:
 				d.proton.enqueue(pkt)
+			case routeRejectIPv6:
+				if reply := protonIPv6Unreachable(pkt, d.rejectIPv6From); len(reply) > 0 {
+					_, _ = d.ep.write([][]byte{reply}, 0)
+				}
 			default:
 				// drop (fail-closed)
 			}
 		}
-		if delivered > 0 {
-			return delivered, nil
+		if delivered > 0 || err != nil {
+			return delivered, err
 		}
 		// No tailnet packets this round; keep reading.
 	}

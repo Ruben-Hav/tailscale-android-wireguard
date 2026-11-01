@@ -42,7 +42,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 @Composable
 fun ExitNodePicker(
     nav: ExitNodePickerNav,
-    model: ExitNodePickerViewModel = viewModel(factory = ExitNodePickerViewModelFactory(nav))
+    model: ExitNodePickerViewModel = viewModel(factory = ExitNodePickerViewModelFactory(nav)),
 ) {
   LoadingIndicator.Wrap {
     Scaffold(topBar = { Header(R.string.choose_exit_node, onBack = nav.onNavigateBackHome) }) {
@@ -61,6 +61,15 @@ fun ExitNodePicker(
       val managedByOrganization by model.managedByOrganization.collectAsState()
       val forcedExitNodeId = MDMSettings.exitNodeID.flow.collectAsState().value.value
 
+      val duplicateExitNodeIDs = tailnetExitNodes.groupBy { it.id }.filterValues { it.size > 1 }
+
+      check(duplicateExitNodeIDs.isEmpty()) {
+        "Duplicate exit node IDs in ExitNodePicker: " +
+            duplicateExitNodeIDs.entries.joinToString("; ") { (id, nodes) ->
+              "$id(count=${nodes.size})"
+            }
+      }
+
       LazyColumn(modifier = Modifier.padding(innerPadding)) {
         item(key = "header") {
           if (forcedExitNodeId != null) {
@@ -71,7 +80,8 @@ fun ExitNodePicker(
                     } ?: stringResource(R.string.exit_node_mdm),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp))
+                modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+            )
           } else {
             ExitNodeItem(
                 model,
@@ -95,7 +105,10 @@ fun ExitNodePicker(
           item(key = "mullvad") {
             Lists.SectionDivider()
             MullvadItem(
-                nav, mullvadExitNodesByCountryCode.size, mullvadExitNodesByCountryCode.selected)
+                nav,
+                mullvadExitNodesByCountryCode.size,
+                mullvadExitNodesByCountryCode.selected,
+            )
           }
         } else if (shouldShowMullvadInfo) {
           item(key = "mullvad_info") {
@@ -156,7 +169,8 @@ fun ExitNodeItem(
               Icon(Icons.Outlined.Check, null)
             }
           }
-        })
+        },
+    )
   }
 }
 
@@ -168,18 +182,21 @@ fun MullvadItem(nav: ExitNodePickerNav, count: Int, selected: Boolean) {
         headlineContent = {
           Text(
               stringResource(R.string.mullvad_exit_nodes),
-              style = MaterialTheme.typography.bodyMedium)
+              style = MaterialTheme.typography.bodyMedium,
+          )
         },
         supportingContent = {
           Text(
               "$count ${stringResource(R.string.countries)}",
-              style = MaterialTheme.typography.bodyMedium)
+              style = MaterialTheme.typography.bodyMedium,
+          )
         },
         trailingContent = {
           if (selected) {
             Icon(Icons.Outlined.Check, null)
           }
-        })
+        },
+    )
   }
 }
 
@@ -227,13 +244,16 @@ fun MullvadInfoItem(nav: ExitNodePickerNav) {
         headlineContent = {
           Text(
               stringResource(R.string.mullvad_exit_nodes),
-              style = MaterialTheme.typography.bodyMedium)
+              style = MaterialTheme.typography.bodyMedium,
+          )
         },
         supportingContent = {
           Text(
               stringResource(R.string.enable_in_the_admin_console),
-              style = MaterialTheme.typography.bodyMedium)
-        })
+              style = MaterialTheme.typography.bodyMedium,
+          )
+        },
+    )
   }
 }
 
@@ -241,7 +261,7 @@ fun MullvadInfoItem(nav: ExitNodePickerNav) {
 fun RunAsExitNodeItem(
     nav: ExitNodePickerNav,
     viewModel: ExitNodePickerViewModel,
-    anyActive: Boolean
+    anyActive: Boolean,
 ) {
   val isRunningExitNode = viewModel.isRunningExitNode.collectAsState().value
 
@@ -258,7 +278,8 @@ fun RunAsExitNodeItem(
         headlineContent = {
           Text(
               stringResource(id = R.string.run_as_exit_node),
-              style = MaterialTheme.typography.bodyMedium)
+              style = MaterialTheme.typography.bodyMedium,
+          )
         },
         supportingContent = {
           if (isRunningExitNode) {
@@ -266,6 +287,7 @@ fun RunAsExitNodeItem(
           } else {
             Text(stringResource(R.string.disabled))
           }
-        })
+        },
+    )
   }
 }

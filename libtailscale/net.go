@@ -153,6 +153,16 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 	routes := rcfg.Routes
 	excluded := rcfg.LocalRoutes
 	protonOn := protonMgr.enabled.Load()
+	rejectUnderlayIPv6 := !protonOn && protonRejectUnderlayIPv6.Load() && !protonHasIPv6ExitRoute(rcfg.Routes)
+	var rejectIPv6From netip.Addr
+	if rejectUnderlayIPv6 {
+		for _, a := range rcfg.LocalAddrs {
+			if a.Addr().Is6() {
+				rejectIPv6From = a.Addr()
+				break
+			}
+		}
+	}
 	if protonOn {
 		routes = append(append([]netip.Prefix{}, rcfg.Routes...), defaultRoute4, defaultRoute6)
 		// Keep LAN / private / link-local / multicast off the Proton tunnel so
@@ -160,6 +170,11 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		excluded = append(append([]netip.Prefix{}, rcfg.LocalRoutes...), protonExcludedPrefixes...)
 		log.Printf("proton: capturing default route; applying %d routes (useExcludeAPI33+): %v", len(routes), routes)
 		log.Printf("proton: excluding (kept local): %v", excluded)
+	} else if rejectUnderlayIPv6 && rejectIPv6From.IsValid() {
+		// The underlay has working IPv4 but failed IPv6 reachability probes.
+		// Return local no-route errors for public IPv6 so cached IPv6 routes in
+		// clients fall back immediately. Tailnet/ULA/link-local routes remain.
+		routes = append(append([]netip.Prefix{}, rcfg.Routes...), protonIPv6Internet)
 	}
 
 	// Decide whether to use ExcludeRoute (API 33+) or compute included prefixes
@@ -270,7 +285,7 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 	}
 	b.logger.Logf("updateTUN: created TUN device")
 
-	if protonOn && protonMgr.tun != nil {
+	if (protonOn && protonMgr.tun != nil) || (rejectUnderlayIPv6 && rejectIPv6From.IsValid()) {
 		// ProtonVPN split tunnel: interpose the demux between the real Android
 		// TUN and Tailscale's engine. Tailscale (via multiTUN) drives the
 		// demux, which returns only tailnet packets and diverts the rest to the
@@ -278,11 +293,15 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		// decrypted return packets back out via this same real device.
 		ep := &realEndpoint{real: tunDev}
 		demux := newDemuxRouter(ep, protonMgr.tun, protonMgr.tailnetTable.Load(), &protonMgr.ready)
-		protonMgr.tun.setWriter(ep)
+		if protonOn {
+			protonMgr.tun.setWriter(ep)
+		} else {
+			demux.rejectIPv6From = rejectIPv6From
+		}
 		protonMgr.curDemux.Store(demux)
 		b.devices.add(demux)
 		b.logger.Logf("updateTUN: added Proton split-tunnel demux")
-		log.Printf("proton: split-tunnel demux installed on freshly-established TUN (default route captured)")
+		log.Printf("proton: demux installed on freshly-established TUN (Proton=%v, IPv6 fallback=%v)", protonOn, rejectUnderlayIPv6)
 
 		// Build the SNAT mapping (device TUN addr <-> Proton client addr) so
 		// outbound packets carry the source IP the Proton server expects.
@@ -290,7 +309,9 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		for _, a := range rcfg.LocalAddrs {
 			tunAddrs = append(tunAddrs, a.Addr())
 		}
-		if nat := buildProtonNAT(tunAddrs, protonMgr.protonV4, protonMgr.protonV6); nat != nil {
+		if !protonOn {
+			clearProtonNAT()
+		} else if nat := buildProtonNAT(tunAddrs, protonMgr.protonV4, protonMgr.protonV6); nat != nil {
 			setProtonNAT(nat)
 			log.Printf("proton: NAT enabled tunAddrs=%v protonV4=%v protonV6=%v", tunAddrs, protonMgr.protonV4, protonMgr.protonV6)
 		} else {
@@ -309,6 +330,10 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 
 	b.lastCfg = rcfg
 	b.lastDNSCfg = dcfg
+	b.protonUnderlayApplied = rejectUnderlayIPv6
+	if !b.protonUnderlayStarted {
+		requestProtonUnderlayCheck(false)
+	}
 	return nil
 }
 
@@ -324,8 +349,18 @@ func closeFileDescriptor() error {
 
 // CloseVPN closes any active TUN devices.
 func (b *backend) CloseTUNs() {
+	b.cancelProtonUnderlayProbe()
+	b.protonUnderlayStarted = false
+	b.protonUnderlayApplied = false
+	protonRejectUnderlayIPv6.Store(false)
 	b.lastCfg = nil
 	b.devices.Shutdown()
+	// Closing the whole VPN also removes its captured internet routes. A pending
+	// Proton retry must never recreate the interface after the user stopped it.
+	if b.protonDisconnectPending {
+		b.cancelProtonDisconnect()
+		protonMgr.notifyState("Disconnected")
+	}
 }
 
 // ifname is the interface name retrieved from LinkProperties on network change. If a network is lost, an empty string is passed in.

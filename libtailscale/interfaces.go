@@ -62,6 +62,10 @@ type AppContext interface {
 	// configuration.
 	GetPlatformDNSConfig() string
 
+	// GetUnderlyingNetworkInfo returns a stable network/address/route key and
+	// whether that non-VPN network has IPv4. Used for safe IPv6 fallback.
+	GetUnderlyingNetworkInfo() string
+
 	// GetSyspolicyStringValue returns the current string value for the given system policy.
 	GetSyspolicyStringValue(key string) (string, error)
 

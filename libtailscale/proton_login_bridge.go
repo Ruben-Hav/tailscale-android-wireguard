@@ -20,11 +20,12 @@ import (
 var protonAPIClient = newProtonAPI()
 
 // ProtonLogin logs in with username+password. Returns a status string:
-//   "ok"  - logged in
-//   "2fa" - call ProtonSubmit2FA next
-//   "hv"  - human verification needed: load the CAPTCHA WebView using
-//           ProtonHVStartToken()/ProtonHVMethods(), then call
-//           ProtonSetHumanVerification() and retry ProtonLogin.
+//
+//	"ok"  - logged in
+//	"2fa" - call ProtonSubmit2FA next
+//	"hv"  - human verification needed: load the CAPTCHA WebView using
+//	        ProtonHVStartToken()/ProtonHVMethods(), then call
+//	        ProtonSetHumanVerification() and retry ProtonLogin.
 func ProtonLogin(username, password string) (string, error) {
 	status, err := protonAPIClient.Login(username, password)
 	if err != nil {
@@ -336,7 +337,7 @@ func connectToLogical(ls *logicalServer, dom *connectingDomain) error {
 			serverPublicKeyBase64: dom.X25519PublicKey,
 			endpoint:              fmt.Sprintf("%s:%d", entryIP, dom.port()),
 			certPEM:               cert.Certificate,
-			clientAddresses:       "10.2.0.2/32", // Proton's fixed WireGuard client address
+			clientAddresses:       protonClientAddresses(ls.Features),
 			logicalID:             ls.ID,
 			country:               ls.ExitCountry,
 			serverName:            ls.Name,

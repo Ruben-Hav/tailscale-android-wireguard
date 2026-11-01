@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.tailscale.ipn.loadtest">
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <application android:debuggable="true" android:label="Protonscale Load Generator"/>
+  <instrumentation android:name=".Load" android:targetPackage="com.tailscale.ipn.loadtest" android:functionalTest="true"/>
+</manifest>

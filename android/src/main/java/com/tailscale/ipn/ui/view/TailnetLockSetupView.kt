@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
@@ -22,10 +21,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextDecoration
@@ -46,7 +45,7 @@ import com.tailscale.ipn.ui.viewModel.TailnetLockSetupViewModelFactory
 @Composable
 fun TailnetLockSetupView(
     backToSettings: BackNavigation,
-    model: TailnetLockSetupViewModel = viewModel(factory = TailnetLockSetupViewModelFactory())
+    model: TailnetLockSetupViewModel = viewModel(factory = TailnetLockSetupViewModelFactory()),
 ) {
   val statusItems by model.statusItems.collectAsState()
   val nodeKey by model.nodeKey.collectAsState()
@@ -64,14 +63,17 @@ fun TailnetLockSetupView(
               modifier =
                   Modifier.focusable(interactionSource = interactionSource).clickable(
                       interactionSource = interactionSource,
-                      indication = LocalIndication.current) {},
+                      indication = LocalIndication.current,
+                  ) {},
               leadingContent = {
                 Icon(
                     painter = painterResource(id = statusItem.icon),
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
               },
-              headlineContent = { Text(stringResource(statusItem.title)) })
+              headlineContent = { Text(stringResource(statusItem.title)) },
+          )
         }
 
         item {
@@ -80,14 +82,16 @@ fun TailnetLockSetupView(
           ClipboardValueView(
               value = nodeKey,
               title = stringResource(R.string.node_key),
-              subtitle = stringResource(R.string.node_key_explainer))
+              subtitle = stringResource(R.string.node_key_explainer),
+          )
 
           // Tailnet lock key section
           Lists.SectionDivider()
           ClipboardValueView(
               value = tailnetLockTlPubKey,
               title = stringResource(R.string.tailnet_lock_key),
-              subtitle = stringResource(R.string.tailnet_lock_key_explainer))
+              subtitle = stringResource(R.string.tailnet_lock_key_explainer),
+          )
         }
       }
     }
@@ -96,13 +100,8 @@ fun TailnetLockSetupView(
 
 @Composable
 private fun ExplainerView() {
-  val handler = LocalUriHandler.current
-
   Lists.MultilineDescription {
-    ClickableText(
-        explainerText(),
-        onClick = { handler.openUri(Links.TAILNET_LOCK_KB_URL) },
-        style = MaterialTheme.typography.bodyMedium)
+    Text(text = explainerText(), style = MaterialTheme.typography.bodyMedium)
   }
 }
 
@@ -113,15 +112,17 @@ fun explainerText(): AnnotatedString {
       append(stringResource(id = R.string.tailnet_lock_explainer))
     }
 
-    pushStringAnnotation(tag = "tailnetLockSupportURL", annotation = Links.TAILNET_LOCK_KB_URL)
+    pushLink(LinkAnnotation.Url(Links.TAILNET_LOCK_KB_URL))
 
     withStyle(
         style =
             SpanStyle(
                 color = MaterialTheme.colorScheme.link,
-                textDecoration = TextDecoration.Underline)) {
-          append(stringResource(id = R.string.learn_more))
-        }
+                textDecoration = TextDecoration.Underline,
+            )
+    ) {
+      append(stringResource(id = R.string.learn_more))
+    }
     pop()
   }
 }

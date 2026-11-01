@@ -50,10 +50,16 @@ const (
 )
 
 const (
-	protonAPIBase    = "https://vpn-api.proton.me"
-	protonAppVersion = "android-vpn@5.10.0" // bump if the API returns a force-update (code 5003)
-	protonUserAgent  = "ProtonVPN/5.10.0 (Android)"
+	protonAPIBase = "https://vpn-api.proton.me"
+	// Match ProtonVPN/android-app's latest stable release (2026-10-22).
+	// Keep both request headers on the same version to avoid API error 5003.
+	protonClientVersion = "5.20.98.0"
+	protonAppVersion    = "android-vpn@" + protonClientVersion
+	protonUserAgent     = "ProtonVPN/" + protonClientVersion + " (Android)"
 )
+
+// ProtonClientVersion reports the API compatibility version of the native client.
+func ProtonClientVersion() string { return protonClientVersion }
 
 // protonSession holds the session tokens. Proton requires an unauthenticated
 // session (tokens present, loggedIn=false) before the SRP login, which then
@@ -634,13 +640,13 @@ type logicalServer struct {
 
 // connectingDomain is one physical server within a logical server.
 type connectingDomain struct {
-	EntryIP          string                      `json:"EntryIP"`
-	EntryPerProtocol map[string]serverEntryInfo  `json:"EntryPerProtocol"`
-	Domain           string                      `json:"Domain"`
-	ID               string                      `json:"ID"`
-	Label            string                      `json:"Label"`
-	Status           int                         `json:"Status"` // 1 = online
-	X25519PublicKey  string                      `json:"X25519PublicKey"`
+	EntryIP          string                     `json:"EntryIP"`
+	EntryPerProtocol map[string]serverEntryInfo `json:"EntryPerProtocol"`
+	Domain           string                     `json:"Domain"`
+	ID               string                     `json:"ID"`
+	Label            string                     `json:"Label"`
+	Status           int                        `json:"Status"` // 1 = online
+	X25519PublicKey  string                     `json:"X25519PublicKey"`
 }
 
 type serverEntryInfo struct {
@@ -710,6 +716,10 @@ func (a *protonAPI) GetCertificate(clientPublicKeyPKIXBase64 string) (*certResp,
 		"ClientPublicKeyMode": "EC",
 		"Mode":                "session",
 		"Duration":            "1440 min",
+		// Proton's certificate API binds these server-side settings to the
+		// registered WireGuard key. SplitTCP is VPN Accelerator, as used by
+		// Proton's official WireGuard clients; it does not change UDP transport.
+		"Features": map[string]bool{"SplitTCP": a.acceleratorEnabled()},
 	}
 	var out certResp
 	if err := a.do(http.MethodPost, "/vpn/v1/certificate", body, &out, true); err != nil {

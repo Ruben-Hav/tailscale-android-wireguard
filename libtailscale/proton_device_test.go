@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tailscale/wireguard-go/tun"
+
 	"golang.org/x/crypto/curve25519"
 )
 
@@ -75,11 +77,29 @@ func TestProtonDeviceReconnect(t *testing.T) {
 			if client.tun == previous {
 				t.Fatal("replacement reused the closed TUN")
 			}
+			// Current Tailscale WireGuard keeps endpoints fixed. Point the test
+			// server at each new client's UDP port instead of relying on roaming.
+			clientState, err := client.dev.IpcGet()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for line := range strings.SplitSeq(clientState, "\n") {
+				if clientPort, ok := strings.CutPrefix(line, "listen_port="); ok {
+					err := server.dev.IpcSet("public_key=" + clientPublic + "\nendpoint=127.0.0.1:" + clientPort + "\n")
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// Trigger a fresh keepalive after the server's endpoint is installed.
+			if err := client.dev.IpcSet("public_key=" + serverPublic + "\npersistent_keepalive_interval=0\npersistent_keepalive_interval=25\n"); err != nil {
+				t.Fatal(err)
+			}
 			if err := client.waitForHandshake(5 * time.Second); err != nil {
 				t.Fatal(err)
 			}
 			client.Close()
-			if _, err := client.tun.Read([][]byte{make([]byte, 2048)}, make([]int, 1), 0); !errors.Is(err, os.ErrClosed) {
+			if _, err := client.tun.Read(make([]byte, 2048), make([]tun.ReadPacket, 1)); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("old TUN read error = %v, want os.ErrClosed", err)
 			}
 			for range client.tun.Events() {

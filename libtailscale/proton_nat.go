@@ -14,8 +14,8 @@
 //   - inbound  (Proton -> app): dest    Proton-addr -> TUN-addr
 // fixing the IPv4 header checksum and the L4 (TCP/UDP/ICMPv6) checksums in place.
 //
-// NOTE: IPv6 extension headers are not parsed; L4 is assumed to start at offset
-// 40. This holds for ordinary TCP/UDP/ICMPv6 traffic.
+// IPv6 extension headers and quoted ICMPv6 errors are translated too, so
+// transport checksums and socket matching for path-MTU errors remain valid.
 
 package libtailscale
 
@@ -46,10 +46,12 @@ func buildProtonNAT(tunAddrs []netip.Addr, protonV4, protonV6 netip.Addr) *proto
 			n.tunV4 = a.As4()
 			n.protonV4 = protonV4.As4()
 			n.haveV4 = true
-		} else if a.Is6() && protonV6.Is6() {
+		} else if a.Is6() {
 			n.tunV6 = a.As16()
-			n.protonV6 = protonV6.As16()
-			n.haveV6 = true
+			if protonV6.Is6() {
+				n.protonV6 = protonV6.As16()
+				n.haveV6 = true
+			}
 		}
 	}
 	if !n.haveV4 && !n.haveV6 {
@@ -125,13 +127,63 @@ func rewriteV4(pkt []byte, off int, from, to [4]byte) {
 }
 
 func rewriteV6(pkt []byte, off int, from, to [16]byte) {
+	rewriteV6Packet(pkt, off, from, to, true)
+}
+
+func ipv6Transport(pkt []byte) (int, byte, bool) {
+	if len(pkt) < 40 || pkt[0]>>4 != 6 {
+		return 0, 0, false
+	}
+	offset, next := 40, pkt[6]
+	for {
+		switch next {
+		case 0, 43, 60: // Hop-by-Hop, Routing, Destination Options.
+			if offset+2 > len(pkt) {
+				return 0, 0, false
+			}
+			size := (int(pkt[offset+1]) + 1) * 8
+			if offset+size > len(pkt) {
+				return 0, 0, false
+			}
+			next = pkt[offset]
+			offset += size
+		case 44: // Only an initial/atomic fragment contains the L4 header.
+			if offset+8 > len(pkt) || binary.BigEndian.Uint16(pkt[offset+2:offset+4])&0xfff8 != 0 {
+				return 0, 0, false
+			}
+			next = pkt[offset]
+			offset += 8
+		case 51: // Authentication Header length is in 32-bit words, minus two.
+			if offset+2 > len(pkt) {
+				return 0, 0, false
+			}
+			size := (int(pkt[offset+1]) + 2) * 4
+			if offset+size > len(pkt) {
+				return 0, 0, false
+			}
+			next = pkt[offset]
+			offset += size
+		default:
+			return offset, next, true
+		}
+	}
+}
+
+func rewriteV6Packet(pkt []byte, off int, from, to [16]byte, translateQuote bool) {
+	if len(pkt) < 40 || pkt[0]>>4 != 6 {
+		return
+	}
 	if [16]byte(pkt[off:off+16]) != from {
 		return
 	}
 	copy(pkt[off:off+16], to[:])
 
-	l4 := pkt[40:]
-	switch pkt[6] { // next header (assumes no extension headers)
+	offset, protocol, ok := ipv6Transport(pkt)
+	if !ok {
+		return
+	}
+	l4 := pkt[offset:]
+	switch protocol {
 	case 6: // TCP
 		if len(l4) >= 18 {
 			fixChecksum(l4[16:18], from[:], to[:])
@@ -147,7 +199,37 @@ func rewriteV6(pkt []byte, off int, from, to [16]byte) {
 		if len(l4) >= 4 {
 			fixChecksum(l4[2:4], from[:], to[:])
 		}
+		if translateQuote && len(l4) >= 48 && l4[0] < 128 && l4[8]>>4 == 6 {
+			// Incoming errors quote the translated outbound source; outgoing
+			// errors quote an inbound destination. Restore the quoted address
+			// as well so the OS can associate the error with the original socket.
+			quotedOff := 8
+			if off == 8 {
+				quotedOff = 24
+			}
+			rewriteV6Packet(l4[8:], quotedOff, from, to, false)
+			setICMPv6Checksum(pkt, offset)
+		}
 	}
+}
+
+func setICMPv6Checksum(pkt []byte, offset int) {
+	l4 := pkt[offset:]
+	l4[2], l4[3] = 0, 0
+	sum := uint32(len(l4) + 58)
+	for _, data := range [][]byte{pkt[8:40], l4} {
+		for len(data) >= 2 {
+			sum += uint32(binary.BigEndian.Uint16(data))
+			data = data[2:]
+		}
+		if len(data) == 1 {
+			sum += uint32(data[0]) << 8
+		}
+	}
+	for sum>>16 != 0 {
+		sum = (sum & 65535) + (sum >> 16)
+	}
+	binary.BigEndian.PutUint16(l4[2:4], ^uint16(sum))
 }
 
 // fixChecksum incrementally updates a 16-bit ones-complement checksum after the

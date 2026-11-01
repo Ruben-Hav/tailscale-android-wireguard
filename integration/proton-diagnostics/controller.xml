@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.tailscale.ipn.networktest">
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <application android:debuggable="true" android:label="Protonscale Network Tests"/>
+  <instrumentation android:name=".Controller" android:targetPackage="com.tailscale.ipn.debug" android:functionalTest="true"/>
+</manifest>

@@ -80,7 +80,7 @@ func newProtonAgent(p protonAgentParams, cb protonAgentCallbacks, connectivity b
 		p.host,
 		p.certServerName,
 		client,
-		nil,   // default features
+		nil, // default features
 		connectivity,
 		0, 0, // default keepalive
 	)

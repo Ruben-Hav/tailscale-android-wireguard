@@ -26,7 +26,6 @@ import (
 	"log"
 	"net/netip"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,13 +46,6 @@ var (
 	defaultRoute4 = netip.MustParsePrefix("0.0.0.0/0")
 	defaultRoute6 = netip.MustParsePrefix("::/0")
 )
-
-// tailscaleRanges always route to Tailscale (the tailnet CGNAT v4 range and the
-// Tailscale ULA), independent of which peer routes are currently present.
-var tailscaleRanges = []netip.Prefix{
-	netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("fd7a:115c:a1e0::/48"),
-}
 
 // protonExcludedPrefixes are kept OFF the Proton tunnel and stay on the local
 // network: RFC1918 private ranges, link-local, and multicast. Without this, LAN
@@ -187,30 +179,6 @@ type protonConnectParams struct {
 	// clientAddresses is the .conf [Interface] Address value, e.g.
 	// "10.2.0.2/32" or "10.2.0.2/32,fd00::2/128". Used to SNAT into the tunnel.
 	clientAddresses string
-}
-
-// parseClientAddrs extracts the first IPv4 and IPv6 client addresses from a
-// WireGuard [Interface] Address value (comma-separated prefixes or addrs).
-func parseClientAddrs(s string) (v4, v6 netip.Addr) {
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if i := strings.IndexByte(part, '/'); i >= 0 {
-			part = part[:i]
-		}
-		a, err := netip.ParseAddr(part)
-		if err != nil {
-			continue
-		}
-		if a.Is4() && !v4.IsValid() {
-			v4 = a
-		} else if a.Is6() && !v6.IsValid() {
-			v6 = a
-		}
-	}
-	return v4, v6
 }
 
 type protonConnectRequest struct {
@@ -370,6 +338,7 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 
 	// Stop forwarding while replacing the device. Each WireGuard device owns
 	// a fresh TUN; only Android VpnService reconfigures reuse that live TUN.
+	b.cancelProtonDisconnect()
 	protonMgr.ready.Store(false)
 	protonMgr.teardownDevice()
 
@@ -377,7 +346,7 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 
 	dev, err := newProtonDevice(defaultMTU, cfg)
 	if err != nil {
-		protonMgr.enabled.Store(false)
+		b.protonDisconnect()
 		return err
 	}
 	protonMgr.mu.Lock()
@@ -392,7 +361,10 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 	protonMgr.mu.Unlock()
 
 	// Re-run updateTUN to install the demux and capture the default route.
-	b.refreshTUN()
+	if err := b.refreshTUN(); err != nil {
+		b.protonDisconnect()
+		return fmt.Errorf("proton: configure VPN routes: %w", err)
+	}
 
 	// Allow encrypted traffic so the handshake/agent can complete, but keep
 	// the UI Connecting until the peer has actually responded.
@@ -408,7 +380,7 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 			serverCAsPEM:   p.agentCAsPEM,
 			host:           p.agentHost,
 			certServerName: p.agentServerName,
-		}, protonMgr.agentCallbacks(), true)
+		}, protonMgr.agentCallbacks(dev), true)
 		if aerr != nil {
 			log.Printf("proton: local agent start failed: %v", aerr)
 			b.protonDisconnect()
@@ -445,25 +417,68 @@ func (m *protonManager) currentAgent() *protonAgent {
 }
 
 func (b *backend) protonDisconnect() {
+	b.cancelProtonDisconnect()
+	b.protonDisconnectPending = true
 	protonMgr.enabled.Store(false)
 	protonMgr.ready.Store(false)
 	protonMgr.clearCurrentConn()
+	protonMgr.notifyState("Disconnecting")
 	protonMgr.teardownDevice()
 	// Re-run updateTUN to drop the demux + default route (back to tailnet-only).
-	b.refreshTUN()
+	// A failed establish leaves the old default routes active, so do not report
+	// Disconnected until they are removed. Preserve tailnet access while retrying.
+	b.restoreAfterProtonDisconnect()
+	requestProtonUnderlayCheck(true)
+}
+
+func (b *backend) protonDisconnectRetryChan() <-chan time.Time {
+	if b.protonDisconnectTimer != nil {
+		return b.protonDisconnectTimer.C
+	}
+	return nil
+}
+
+func (b *backend) cancelProtonDisconnect() {
+	if b.protonDisconnectTimer != nil {
+		b.protonDisconnectTimer.Stop()
+		b.protonDisconnectTimer = nil
+	}
+	b.protonDisconnectPending = false
+	b.protonDisconnectAttempts = 0
+}
+
+func (b *backend) restoreAfterProtonDisconnect() {
+	if !b.protonDisconnectPending {
+		return
+	}
+	b.protonDisconnectAttempts++
+	if err := b.refreshTUN(); err != nil {
+		// Back off from 250 ms to 4 seconds. The backend loop stays available
+		// for reconnect, network changes, and the user's full VPN stop action.
+		delay := 250 * time.Millisecond << min(b.protonDisconnectAttempts-1, 4)
+		log.Printf("proton: restoring tailnet-only routes failed (attempt %d); retrying in %v: %v", b.protonDisconnectAttempts, delay, err)
+		if b.protonDisconnectAttempts == 3 {
+			protonMgr.notifyError(0, "Restoring internet access failed; retrying automatically")
+		}
+		if b.protonDisconnectTimer != nil {
+			b.protonDisconnectTimer.Stop()
+		}
+		b.protonDisconnectTimer = time.NewTimer(delay)
+		return
+	}
+	log.Printf("proton: tailnet-only routes restored after %d attempt(s)", b.protonDisconnectAttempts)
+	b.cancelProtonDisconnect()
 	protonMgr.notifyState("Disconnected")
 }
 
 // refreshTUN re-applies the last router/DNS config so updateTUN picks up the
 // new Proton enabled/disabled state (installing or removing the demux and the
 // captured default route).
-func (b *backend) refreshTUN() {
+func (b *backend) refreshTUN() error {
 	if b.lastCfg == nil || vpnService.service == nil {
-		return
+		return nil
 	}
-	if err := b.updateTUN(b.lastCfg, b.lastDNSCfg); err != nil {
-		log.Printf("proton: refreshTUN failed: %v", err)
-	}
+	return b.updateTUN(b.lastCfg, b.lastDNSCfg)
 }
 
 // teardownDevice closes the current agent, device, and device-owned TUN.
@@ -499,10 +514,15 @@ func (m *protonManager) handshakeFinished(result protonHandshakeResult) {
 }
 
 // agentCallbacks maps local-agent events to readiness + UI notifications.
-func (m *protonManager) agentCallbacks() protonAgentCallbacks {
+func (m *protonManager) agentCallbacks(dev *protonDevice) protonAgentCallbacks {
 	c := agent.Constants()
 	return protonAgentCallbacks{
 		onState: func(state string) {
+			// Closing a retired agent emits Disconnected synchronously. Its
+			// callbacks must not bypass route restoration or affect a new device.
+			if m.currentDevice() != dev || !m.enabled.Load() {
+				return
+			}
 			switch state {
 			case c.StateClientCertificateExpiredError,
 				c.StateClientCertificateUnknownCA,
@@ -514,7 +534,9 @@ func (m *protonManager) agentCallbacks() protonAgentCallbacks {
 			m.notifyState(state)
 		},
 		onError: func(code int, desc string) {
-			m.notifyError(code, desc)
+			if m.currentDevice() == dev && m.enabled.Load() {
+				m.notifyError(code, desc)
+			}
 		},
 	}
 }
@@ -535,22 +557,4 @@ func (m *protonManager) notifyError(code int, desc string) {
 	if r != nil {
 		r.OnProtonError(code, desc)
 	}
-}
-
-// buildTailnetTable builds the demux's "route via Tailscale" set from the
-// router config's routes, skipping any default route.
-func buildTailnetTable(routes []netip.Prefix) *bart.Lite {
-	t := &bart.Lite{}
-	// Always route the whole Tailscale range to Tailscale, so tailnet peer
-	// traffic goes to the engine even if a specific peer route isn't present.
-	for _, p := range tailscaleRanges {
-		t.Insert(p)
-	}
-	for _, p := range routes {
-		if p.Bits() == 0 {
-			continue // skip 0.0.0.0/0 and ::/0
-		}
-		t.Insert(p)
-	}
-	return t
 }

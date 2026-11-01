@@ -1,0 +1,4 @@
+*.sh text eol=lf
+/tool/* text eol=lf
+/android/gradlew text eol=lf
+/go.toolchain.rev text eol=lf
