@@ -313,6 +313,12 @@ func (a *App) runBackend(ctx context.Context, hardwareAttestation bool) error {
 			b.startProtonUnderlayProbe(true)
 		case result := <-onProtonHandshake:
 			protonMgr.handshakeFinished(result)
+		case <-onProtonAgent:
+			protonMgr.handleAgentEvents(func() {
+				if !b.appCtx.WaitForVPNNetworkReady(500) {
+					log.Printf("proton: Android VPN validation wait timed out; using authenticated agent readiness")
+				}
+			})
 		case r := <-onProtonReceiver:
 			protonMgr.mu.Lock()
 			protonMgr.receiver = r

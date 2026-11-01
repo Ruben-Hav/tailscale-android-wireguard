@@ -65,6 +65,18 @@ comma-separated public test IPs in `addresses`; `/trace/stop` returns bounded
 TCP metadata and checksum validity, without packet payload or TLS secrets.
 The diagnostic-only `/test/ipv6` injection exercises IPv4-only-server fallback.
 
+`./integration/proton-diagnostics/verify-connectivity.ps1` checks immediate,
+verified TLS on three comparison servers with Accelerator enabled and disabled,
+then reuses HTTP clients across four connect/disconnect cycles. It also records
+per-family IPv6 TLS checks and verifies the saved login/node. It works with a
+normal APK; profiling and trace commands require a diagnostic build. Connection
+setup time is recorded separately from HTTP request latency, without a fixed
+post-connect sleep. It restores the original Accelerator setting and disconnects
+Proton at completion. The comparison server names must still be available;
+`-ServerNames` selects a smaller set to limit fresh-certificate demand. Stop on
+Proton certificate-generation rate limits; repeated reconnect loops can exhaust
+this quota even though the login stays valid.
+
 Profile serialization allocates memory itself; exclude those stacks when
 examining allocation deltas, as shown above. Heap profiles are sampled, so use
 the manifest's runtime counters for exact allocation totals. Short runs may

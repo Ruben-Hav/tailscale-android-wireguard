@@ -171,12 +171,15 @@ func ProtonProfileStop() (string, error) {
 }
 
 type protonTCPTrace struct {
-	Phase         string `json:"phase"`
-	Src, Dst      string
-	Length        int  `json:"length"`
-	Flags         byte `json:"flags"`
-	Seq, Ack      uint32
-	ValidChecksum bool `json:"validChecksum"`
+	Micros                      int64  `json:"micros"`
+	Phase                       string `json:"phase"`
+	Src, Dst                    string
+	Length                      int `json:"length"`
+	PayloadLength               int `json:"payloadLength"`
+	SourcePort, DestinationPort uint16
+	Flags                       byte `json:"flags"`
+	Seq, Ack                    uint32
+	ValidChecksum               bool `json:"validChecksum"`
 }
 
 var protonTracing struct {
@@ -184,6 +187,7 @@ var protonTracing struct {
 	enabled   atomic.Bool
 	addresses map[netip.Addr]bool
 	packets   []protonTCPTrace
+	started   time.Time
 }
 
 // ProtonTestIPv6Available injects the IPv4-only-server case in diagnostic APKs.
@@ -213,6 +217,7 @@ func ProtonTraceStart(addresses string) error {
 	protonTracing.Lock()
 	defer protonTracing.Unlock()
 	protonTracing.addresses, protonTracing.packets = allowed, nil
+	protonTracing.started = time.Now()
 	protonTracing.enabled.Store(true)
 	return nil
 }
@@ -261,5 +266,5 @@ func protonTracePacket(phase string, pkt []byte) {
 	for sum>>16 != 0 {
 		sum = (sum & 65535) + (sum >> 16)
 	}
-	protonTracing.packets = append(protonTracing.packets, protonTCPTrace{Phase: phase, Src: src.String(), Dst: dst.String(), Length: len(tcp), Flags: tcp[13], Seq: binary.BigEndian.Uint32(tcp[4:8]), Ack: binary.BigEndian.Uint32(tcp[8:12]), ValidChecksum: uint16(sum) == 65535})
+	protonTracing.packets = append(protonTracing.packets, protonTCPTrace{Micros: time.Since(protonTracing.started).Microseconds(), Phase: phase, Src: src.String(), Dst: dst.String(), Length: len(tcp), PayloadLength: len(tcp) - int(tcp[12]>>4)*4, SourcePort: binary.BigEndian.Uint16(tcp[0:2]), DestinationPort: binary.BigEndian.Uint16(tcp[2:4]), Flags: tcp[13], Seq: binary.BigEndian.Uint32(tcp[4:8]), Ack: binary.BigEndian.Uint32(tcp[8:12]), ValidChecksum: uint16(sum) == 65535})
 }

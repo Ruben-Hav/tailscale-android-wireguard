@@ -66,6 +66,10 @@ type AppContext interface {
 	// whether that non-VPN network has IPv4. Used for safe IPv6 fallback.
 	GetUnderlyingNetworkInfo() string
 
+	// WaitForVPNNetworkReady waits at most timeoutMillis for Android's default
+	// VPN network to validate. Called from a worker, never the backend loop.
+	WaitForVPNNetworkReady(timeoutMillis int) bool
+
 	// GetSyspolicyStringValue returns the current string value for the given system policy.
 	GetSyspolicyStringValue(key string) (string, error)
 

@@ -106,7 +106,7 @@ public final class Controller extends Instrumentation {
       case "/state":return stats();
       case "/network":return network();
       case "/connect":
-        if(body.has("serverID"))serverID=body.getString("serverID");error="";state="Connecting";Libtailscale.protonConnectServer(serverID);await("Connected");Thread.sleep(400);return stats();
+        if(body.has("serverID"))serverID=body.getString("serverID");error="";state="Connecting";long connectStarted=SystemClock.elapsedRealtime();Libtailscale.protonConnectServer(serverID);await("Connected");return stats().put("connectMs",SystemClock.elapsedRealtime()-connectStarted);
       case "/servers":return new JSONObject().put("servers",new JSONArray(Libtailscale.protonListServers("NL")));
       case "/tailnet/stop":case "/tailnet/start":{
         Intent i=new Intent();i.setClassName("com.tailscale.ipn.debug","com.tailscale.ipn.IPNService");i.setAction(path.endsWith("stop")?"com.tailscale.ipn.STOP_VPN":"com.tailscale.ipn.START_VPN");if(path.endsWith("stop"))getTargetContext().startService(i);else getTargetContext().startForegroundService(i);Thread.sleep(500);return stats();

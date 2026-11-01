@@ -32,4 +32,4 @@ CC="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/${triple}26-clang" \
     -o "$out_dir/accelerator.test" ./libtailscale
 "$adb_bin" -s "$ANDROID_SERIAL" push "$out_dir/accelerator.test" "$remote"
 "$adb_bin" -s "$ANDROID_SERIAL" shell chmod 755 "$remote"
-"$adb_bin" -s "$ANDROID_SERIAL" shell "$remote -test.run=TestProtonAccelerator -test.v=true"
+"$adb_bin" -s "$ANDROID_SERIAL" shell "$remote -test.run='TestProton(Accelerator|LogicalsAPI|Agent)' -test.v=true"

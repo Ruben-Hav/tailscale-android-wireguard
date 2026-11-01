@@ -12,6 +12,22 @@ disconnect and reconnect Proton VPN after changing it. The client explicitly
 requests Proton's `SplitTCP` certificate feature while retaining WireGuard UDP.
 Imported WireGuard configurations keep their original server-side settings.
 
+Account connections authenticate the in-tunnel local agent using Proton's CA
+bundle and the selected server's certificate name. Forwarding waits for the
+server to acknowledge the requested `split-tcp` value. Connected is then
+published after Android's VPN validation signal, with a bounded 500 ms wait.
+The reserved control host/port is `10.2.0.1:65432`; other application ports still
+follow overlapping tailnet subnet routes. Retired-agent callbacks cannot change
+a replacement connection or bypass disconnect route restoration.
+
+Country lists, server lists and connection selection share an immutable,
+account-scoped server snapshot for up to five minutes. Concurrent misses share
+one request; expired data and failed refreshes are not silently reused.
+
+IPv4 NAT respects fragment offsets (including tiny TCP fragments), UDP disabled
+checksums and quoted ICMP errors. Quoted IP/transport checksums are translated
+for socket matching and path-MTU errors, including IPv4 options and short quotes.
+
 Account-based connections use Proton's IPv6 client address when the selected
 server advertises IPv6 support. IPv4-only servers return local ICMPv6 no-route
 errors, allowing clients to fall back promptly while IPv6 remains captured.
@@ -41,9 +57,10 @@ Run the focused routing and WireGuard reconnect tests inside the build environme
 bash scripts/test-proton-device.sh
 ```
 
-Run the Accelerator certificate-request and saved-setting tests against a
-disposable Android emulator/device accessible to ADB from the build environment.
-This older suite replaces app data; do not use it with a saved real login:
+Run the native certificate/API, saved-setting and agent-readiness tests against
+an Android emulator/device accessible to ADB from the build environment. This
+standalone test binary uses mocked HTTP/preferences and leaves VPN app data and
+saved logins alone:
 
 ```sh
 ANDROID_SERIAL=emulator-5554 bash scripts/test-proton-accelerator.sh

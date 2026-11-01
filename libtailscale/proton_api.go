@@ -74,7 +74,8 @@ type protonSession struct {
 func (s protonSession) hasTokens() bool { return s.UID != "" && s.AccessToken != "" }
 
 type protonAPI struct {
-	http *http.Client
+	http     *http.Client
+	logicals protonLogicalsCache
 
 	mu      sync.Mutex
 	session protonSession
@@ -613,6 +614,7 @@ func (a *protonAPI) Logout() error {
 	a.hvToken, a.hvTokenType = "", ""
 	a.mu.Unlock()
 	a.clearPersisted()
+	a.logicals.invalidate()
 	return err
 }
 
@@ -624,63 +626,19 @@ func (a *protonAPI) loggedIn() bool {
 
 // --- VPN endpoints ---
 
-// logicalServer is one ProtonVPN logical server (a country/city endpoint).
-type logicalServer struct {
-	ID          string             `json:"ID"`
-	Name        string             `json:"Name"`
-	ExitCountry string             `json:"ExitCountry"`
-	City        string             `json:"City"`
-	Tier        int                `json:"Tier"`
-	Features    int                `json:"Features"`
-	Load        int                `json:"Load"`
-	Score       float64            `json:"Score"`
-	Status      int                `json:"Status"` // 1 = enabled
-	Servers     []connectingDomain `json:"Servers"`
-}
-
-// connectingDomain is one physical server within a logical server.
-type connectingDomain struct {
-	EntryIP          string                     `json:"EntryIP"`
-	EntryPerProtocol map[string]serverEntryInfo `json:"EntryPerProtocol"`
-	Domain           string                     `json:"Domain"`
-	ID               string                     `json:"ID"`
-	Label            string                     `json:"Label"`
-	Status           int                        `json:"Status"` // 1 = online
-	X25519PublicKey  string                     `json:"X25519PublicKey"`
-}
-
-type serverEntryInfo struct {
-	IPv4  string `json:"IPv4"`
-	Ports []int  `json:"Ports"`
-}
-
-// entryIP returns the WireGuard entry IP for this physical server.
-func (d *connectingDomain) entryIP() string {
-	if e, ok := d.EntryPerProtocol["WireGuardUDP"]; ok && e.IPv4 != "" {
-		return e.IPv4
-	}
-	return d.EntryIP
-}
-
-// port returns the WireGuard UDP port (default 51820).
-func (d *connectingDomain) port() int {
-	if e, ok := d.EntryPerProtocol["WireGuardUDP"]; ok && len(e.Ports) > 0 {
-		return e.Ports[0]
-	}
-	return 51820
-}
-
-type logicalsResp struct {
-	LogicalServers []logicalServer `json:"LogicalServers"`
-}
-
-// GetLogicals fetches the full server list.
+// GetLogicals shares a server snapshot for at most five minutes. Concurrent
+// misses join the same request; refresh failures do not serve expired metadata.
 func (a *protonAPI) GetLogicals() (*logicalsResp, error) {
-	var out logicalsResp
-	if err := a.do(http.MethodGet, "/vpn/v1/logicals?SecureCoreFilter=all&WithEntriesForProtocols=WireGuardUDP", nil, &out, true); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	a.mu.Lock()
+	scope := a.session.UID
+	a.mu.Unlock()
+	return a.logicals.get(scope, func() (*logicalsResp, error) {
+		var out logicalsResp
+		if err := a.do(http.MethodGet, "/vpn/v1/logicals?SecureCoreFilter=all&WithEntriesForProtocols=WireGuardUDP", nil, &out, true); err != nil {
+			return nil, err
+		}
+		return &out, nil
+	})
 }
 
 type vpnInfoResp struct {

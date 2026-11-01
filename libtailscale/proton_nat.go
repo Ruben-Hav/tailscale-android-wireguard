@@ -14,8 +14,9 @@
 //   - inbound  (Proton -> app): dest    Proton-addr -> TUN-addr
 // fixing the IPv4 header checksum and the L4 (TCP/UDP/ICMPv6) checksums in place.
 //
-// IPv6 extension headers and quoted ICMPv6 errors are translated too, so
+// Fragment offsets and quoted ICMP errors are respected too, so payload bytes,
 // transport checksums and socket matching for path-MTU errors remain valid.
+// IPv6 also supports the relevant extension headers.
 
 package libtailscale
 
@@ -97,33 +98,74 @@ func dnatInbound(pkt []byte) {
 }
 
 func rewriteV4(pkt []byte, off int, from, to [4]byte) {
-	if [4]byte(pkt[off:off+4]) != from {
-		return // not the address we map
-	}
-	copy(pkt[off:off+4], to[:])
+	rewriteV4Packet(pkt, off, from, to, true)
+}
 
-	ihl := int(pkt[0]&0x0f) * 4
-	if ihl < 20 || ihl > len(pkt) {
+func rewriteV4Packet(pkt []byte, off int, from, to [4]byte, translateQuote bool) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || (off != 12 && off != 16) {
 		return
 	}
+	ihl := int(pkt[0]&0x0f) * 4
+	total := int(binary.BigEndian.Uint16(pkt[2:4]))
+	if ihl < 20 || ihl > len(pkt) || total < ihl || [4]byte(pkt[off:off+4]) != from {
+		return
+	}
+	// ICMP quotes may contain only part of the original packet. Ignore any
+	// padding after the declared length, but permit a truncated quoted payload.
+	pkt = pkt[:min(len(pkt), total)]
+	copy(pkt[off:off+4], to[:])
 	// IPv4 header checksum covers the addresses.
 	fixChecksum(pkt[10:12], from[:], to[:])
 
 	l4 := pkt[ihl:]
+	fragmentOffset := int(binary.BigEndian.Uint16(pkt[6:8])&0x1fff) * 8
+	checksumOffset := -1
 	switch pkt[9] { // protocol
-	case 6: // TCP: checksum at [16:18], includes pseudo-header (src/dst).
-		if len(l4) >= 18 {
-			fixChecksum(l4[16:18], from[:], to[:])
-		}
-	case 17: // UDP: checksum at [6:8]; 0 means "no checksum".
-		if len(l4) >= 8 && (l4[6] != 0 || l4[7] != 0) {
-			fixChecksum(l4[6:8], from[:], to[:])
-			if l4[6] == 0 && l4[7] == 0 {
-				l4[6], l4[7] = 0xff, 0xff // 0 is reserved for "no checksum"
+	case 6:
+		checksumOffset = 16 - fragmentOffset
+	case 17:
+		checksumOffset = 6 - fragmentOffset
+	case 1:
+		if translateQuote && fragmentOffset == 0 && len(l4) >= 28 && isICMPv4Error(l4[0]) {
+			// Inbound errors quote our translated outbound source. Outbound
+			// errors quote the translated inbound destination. Restore that
+			// address, its IP checksum, and any quoted transport checksum.
+			quotedOff := 12
+			if off == 12 {
+				quotedOff = 16
 			}
+			quote := l4[8:]
+			// All changes are within the first 60 (max IHL) + 18 bytes.
+			// Updating incrementally also works for a fragmented ICMP error
+			// whose remaining payload is absent from this fragment.
+			var before [78]byte
+			n := copy(before[:], quote)
+			rewriteV4Packet(quote, quotedOff, from, to, false)
+			fixChecksum(l4[2:4], before[:n], quote[:n])
 		}
-		// ICMPv4 (1): checksum does not cover IP addresses; nothing to do.
 	}
+	// Most non-initial fragments contain only payload. A tiny TCP first
+	// fragment can put the checksum in a later fragment, so update precisely
+	// the fragment containing that word instead of interpreting every fragment
+	// as a new transport header. UDP zero checksums must remain disabled.
+	if checksumOffset >= 0 && checksumOffset+2 <= len(l4) {
+		csum := l4[checksumOffset : checksumOffset+2]
+		if pkt[9] == 17 && binary.BigEndian.Uint16(csum) == 0 {
+			return
+		}
+		fixChecksum(csum, from[:], to[:])
+		if pkt[9] == 17 && binary.BigEndian.Uint16(csum) == 0 {
+			binary.BigEndian.PutUint16(csum, 0xffff)
+		}
+	}
+}
+
+func isICMPv4Error(kind byte) bool {
+	switch kind {
+	case 3, 4, 5, 11, 12: // Unreachable, Source Quench, Redirect, Time Exceeded, Parameter Problem.
+		return true
+	}
+	return false
 }
 
 func rewriteV6(pkt []byte, off int, from, to [16]byte) {

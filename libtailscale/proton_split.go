@@ -41,6 +41,7 @@
 package libtailscale
 
 import (
+	"encoding/binary"
 	"log"
 	"net/netip"
 	"os"
@@ -357,6 +358,7 @@ type demuxRouter struct {
 	protonReady *atomic.Bool
 	// Valid only in tailnet-only mode on a confirmed broken IPv6 underlay.
 	rejectIPv6From netip.Addr
+	agentAddr      netip.Addr
 }
 
 func newDemuxRouter(ep *realEndpoint, proton *protonTUN, table *bart.Lite, ready *atomic.Bool) *demuxRouter {
@@ -376,6 +378,12 @@ func (d *demuxRouter) route(pkt []byte) pxRoute {
 	if !ok {
 		return routeDrop
 	}
+	// Only the local agent's TCP port overrides an overlapping tailnet subnet.
+	// All other traffic to that address still follows the tailnet table. This
+	// also lets the agent recover while normal internet traffic is fail closed.
+	if d.agentAddr.IsValid() && addr == d.agentAddr && d.proton != nil && isProtonAgentTCP(pkt) {
+		return routeProton
+	}
 	if t := d.table.Load(); t != nil {
 		if t.Contains(addr) {
 			return routeTailscale
@@ -394,6 +402,14 @@ func (d *demuxRouter) route(pkt []byte) pxRoute {
 		return routeProton
 	}
 	return routeDrop // fail-closed: never leak non-tailnet traffic.
+}
+
+func isProtonAgentTCP(pkt []byte) bool {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 || pkt[9] != 6 || binary.BigEndian.Uint16(pkt[6:8])&0x1fff != 0 {
+		return false
+	}
+	ihl := int(pkt[0]&15) * 4
+	return ihl >= 20 && len(pkt) >= ihl+4 && binary.BigEndian.Uint16(pkt[ihl+2:ihl+4]) == 65432
 }
 
 func isNonRoutable(a netip.Addr) bool {

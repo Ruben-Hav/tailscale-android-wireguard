@@ -318,6 +318,9 @@ func protonLogicals() (*logicalsResp, int, error) {
 
 // connectToLogical registers a fresh key and brings up the tunnel to ls/dom.
 func connectToLogical(ls *logicalServer, dom *connectingDomain) error {
+	if dom.Domain == "" {
+		return fmt.Errorf("proton: server %s has no local-agent certificate name", ls.Name)
+	}
 	// Generate a fresh key and certify it (registers the public key so the
 	// derived WireGuard key is accepted by the server).
 	pub, err := ProtonGenerateKey()
@@ -345,6 +348,7 @@ func connectToLogical(ls *logicalServer, dom *connectingDomain) error {
 		},
 		reply: make(chan error, 1),
 	}
+	configureProtonAgent(&req.params, dom)
 	onProtonConnect <- req
 	return <-req.reply
 }

@@ -14,6 +14,8 @@ import android.content.RestrictionsManager
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -102,6 +104,33 @@ class App : UninitializedApp(), libtailscale.AppContext, ViewModelStoreOwner {
   override fun shouldUseGoogleDNSFallback(): Boolean = BuildConfig.USE_GOOGLE_DNS_FALLBACK
 
   override fun getUnderlyingNetworkInfo(): String = NetworkChangeCallback.underlyingNetworkInfo()
+
+  override fun waitForVPNNetworkReady(timeoutMillis: Long): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return true
+    val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    return try {
+      awaitProtonVpnReadiness(timeoutMillis.coerceIn(0, 500)) { ready ->
+        val callback = object : ConnectivityManager.NetworkCallback() {
+          override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN) &&
+                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
+              ready()
+            }
+          }
+        }
+        val unsubscribe = { manager.unregisterNetworkCallback(callback) }
+        manager.registerDefaultNetworkCallback(callback)
+        unsubscribe
+      }
+    } catch (e: InterruptedException) {
+      Thread.currentThread().interrupt()
+      false
+    } catch (e: RuntimeException) {
+      TSLog.w("ProtonReadiness", "Could not await VPN validation: $e")
+      false
+    }
+  }
 
   override fun log(s: String, s1: String) {
     Log.d(s, s1)

@@ -77,9 +77,15 @@ type protonManager struct {
 	agent *protonAgent  // current local-agent connection
 	cfg   protonConfig
 
+	// Agent callbacks enqueue events without waiting on the backend loop.
+	// Closing an agent can invoke callbacks synchronously on that loop.
+	agentEvents     []protonAgentEvent // guarded by mu; drained on runBackend
+	agentGeneration uint64             // backend loop only; retires pending Android waits
+
 	// Proton-assigned client tunnel addresses (from the .conf [Interface]
 	// Address), used to SNAT outbound traffic into the Proton tunnel.
 	protonV4, protonV6 netip.Addr
+	agentAddr          netip.Addr
 
 	// tailnetTable holds the current tailnet prefixes for the demux; curDemux
 	// is the live demux so its table can be updated in place on reconfigure.
@@ -191,12 +197,22 @@ type protonHandshakeResult struct {
 	err error
 }
 
+type protonAgentEvent struct {
+	dev          *protonDevice
+	state        string
+	code         int
+	description  string
+	networkReady bool
+	generation   uint64
+}
+
 var (
 	onProtonConnect    = make(chan protonConnectRequest)
 	onProtonDisconnect = make(chan struct{}, 1)
 	onProtonReceiver   = make(chan ProtonStatusReceiver, 1)
 	onProtonRefresh    = make(chan struct{}, 1) // re-apply the TUN (e.g. custom DNS changed)
 	onProtonHandshake  = make(chan protonHandshakeResult, 1)
+	onProtonAgent      = make(chan struct{}, 1)
 )
 
 // --- Exported gomobile bridge functions (callable from Kotlin) ---
@@ -313,6 +329,7 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 	// Record the Proton client addresses for SNAT before refreshTUN (updateTUN
 	// builds the NAT mapping). Touched only on the runBackend loop.
 	protonMgr.protonV4, protonMgr.protonV6 = parseClientAddrs(p.clientAddresses)
+	protonMgr.agentAddr, _ = netip.ParseAddr(hostOnly(p.agentHost))
 	log.Printf("proton: client addrs v4=%v v6=%v", protonMgr.protonV4, protonMgr.protonV6)
 
 	serverHex, err := serverPublicHexFromBase64(p.serverPublicKeyBase64)
@@ -366,10 +383,11 @@ func (b *backend) protonConnect(p protonConnectParams) (err error) {
 		return fmt.Errorf("proton: configure VPN routes: %w", err)
 	}
 
-	// Allow encrypted traffic so the handshake/agent can complete, but keep
-	// the UI Connecting until the peer has actually responded.
+	// Only the explicit in-tunnel control address is available before the
+	// agent confirms readiness. A WireGuard handshake alone does not mean
+	// the server has authorized normal TLS traffic for this client yet.
 	willStartAgent := !manual && p.certPEM != "" && p.agentHost != ""
-	protonMgr.ready.Store(true)
+	protonMgr.ready.Store(!willStartAgent)
 	protonMgr.notifyState("Connecting")
 
 	// Start the in-tunnel local agent (v1 scope) when an agent host is provided.
@@ -484,6 +502,7 @@ func (b *backend) refreshTUN() error {
 // teardownDevice closes the current agent, device, and device-owned TUN.
 func (m *protonManager) teardownDevice() {
 	m.mu.Lock()
+	m.ready.Store(false)
 	ag, dev := m.agent, m.dev
 	m.agent, m.dev = nil, nil
 	m.tun = nil
@@ -515,29 +534,66 @@ func (m *protonManager) handshakeFinished(result protonHandshakeResult) {
 
 // agentCallbacks maps local-agent events to readiness + UI notifications.
 func (m *protonManager) agentCallbacks(dev *protonDevice) protonAgentCallbacks {
-	c := agent.Constants()
 	return protonAgentCallbacks{
 		onState: func(state string) {
-			// Closing a retired agent emits Disconnected synchronously. Its
-			// callbacks must not bypass route restoration or affect a new device.
-			if m.currentDevice() != dev || !m.enabled.Load() {
-				return
-			}
-			switch state {
-			case c.StateClientCertificateExpiredError,
-				c.StateClientCertificateUnknownCA,
-				c.StateServerCertificateError,
-				c.StateHardJailed:
-				// Fatal: fail closed until Kotlin reconnects with a fresh cert.
-				m.ready.Store(false)
-			}
-			m.notifyState(state)
+			m.enqueueAgentEvent(protonAgentEvent{dev: dev, state: state})
 		},
 		onError: func(code int, desc string) {
-			if m.currentDevice() == dev && m.enabled.Load() {
-				m.notifyError(code, desc)
-			}
+			m.enqueueAgentEvent(protonAgentEvent{dev: dev, code: code, description: desc})
 		},
+	}
+}
+
+func (m *protonManager) enqueueAgentEvent(event protonAgentEvent) {
+	m.mu.Lock()
+	if m.dev != event.dev || !m.enabled.Load() {
+		m.mu.Unlock()
+		return
+	}
+	m.agentEvents = append(m.agentEvents, event)
+	m.mu.Unlock()
+	select {
+	case onProtonAgent <- struct{}{}:
+	default:
+	}
+}
+
+// handleAgentEvents runs on the same backend loop as connect/disconnect. A
+// retired connection's callbacks cannot re-open forwarding or report Connected
+// over a replacement connection or pending route restoration.
+func (m *protonManager) handleAgentEvents(waitForNetwork func()) {
+	m.mu.Lock()
+	events := m.agentEvents
+	m.agentEvents = nil
+	m.mu.Unlock()
+	for _, event := range events {
+		if m.currentDevice() != event.dev || !m.enabled.Load() {
+			continue
+		}
+		if event.state != "" {
+			if event.networkReady {
+				if event.generation == m.agentGeneration && m.ready.Load() {
+					m.notifyState(event.state)
+				}
+				continue
+			}
+			m.agentGeneration++
+			m.ready.Store(event.state == agent.Constants().StateConnected)
+			if m.ready.Load() && waitForNetwork != nil {
+				generation := m.agentGeneration
+				// Forwarding permits Android's own validation probes now that
+				// Proton has authenticated the tunnel. Publish Connected after
+				// Android acknowledges it, bounded to the official 500 ms wait.
+				go func() {
+					waitForNetwork()
+					m.enqueueAgentEvent(protonAgentEvent{dev: event.dev, state: event.state, networkReady: true, generation: generation})
+				}()
+			} else {
+				m.notifyState(event.state)
+			}
+		} else {
+			m.notifyError(event.code, event.description)
+		}
 	}
 }
 

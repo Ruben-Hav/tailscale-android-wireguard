@@ -165,9 +165,22 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 	}
 	if protonOn {
 		routes = append(append([]netip.Prefix{}, rcfg.Routes...), defaultRoute4, defaultRoute6)
+		if addr := protonMgr.agentAddr; addr.IsValid() {
+			routes = append(routes, netip.PrefixFrom(addr, addr.BitLen()))
+		}
 		// Keep LAN / private / link-local / multicast off the Proton tunnel so
 		// it stays on the local network instead of being black-holed.
 		excluded = append(append([]netip.Prefix{}, rcfg.LocalRoutes...), protonExcludedPrefixes...)
+		if protonMgr.agentAddr.IsValid() {
+			// The explicit control host must remain reachable through Proton
+			// even on pre-33 Android, where included-minus-excluded routes are
+			// calculated before they reach VpnService.Builder.
+			controlExcluded, err := protonExclusionsExceptAgent(excluded, protonMgr.agentAddr)
+			if err != nil {
+				return err
+			}
+			excluded = controlExcluded
+		}
 		log.Printf("proton: capturing default route; applying %d routes (useExcludeAPI33+): %v", len(routes), routes)
 		log.Printf("proton: excluding (kept local): %v", excluded)
 	} else if rejectUnderlayIPv6 && rejectIPv6From.IsValid() {
@@ -295,6 +308,7 @@ func (b *backend) updateTUN(rcfg *router.Config, dcfg *dns.OSConfig) (err error)
 		demux := newDemuxRouter(ep, protonMgr.tun, protonMgr.tailnetTable.Load(), &protonMgr.ready)
 		if protonOn {
 			protonMgr.tun.setWriter(ep)
+			demux.agentAddr = protonMgr.agentAddr
 		} else {
 			demux.rejectIPv6From = rejectIPv6From
 		}

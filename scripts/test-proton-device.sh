@@ -7,8 +7,13 @@ cd "$(dirname "$0")/.."
     libtailscale/proton_split.go \
     libtailscale/proton_trace_disabled.go \
     libtailscale/proton_nat.go \
+    libtailscale/proton_nat_test.go \
     libtailscale/proton_ipv6.go \
     libtailscale/proton_underlay_probe.go \
+    libtailscale/proton_logicals.go \
+    libtailscale/proton_logicals_test.go \
+    libtailscale/proton_routes.go \
+    libtailscale/proton_routes_test.go \
     libtailscale/proton_socket_test.go \
     libtailscale/proton_split_test.go \
     libtailscale/proton_ipv6_test.go \

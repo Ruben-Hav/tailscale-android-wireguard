@@ -25,7 +25,7 @@ android {
     minSdk = 26
     targetSdk = androidApiLevel
 
-    versionCode = 621
+    versionCode = 622
     versionName = getVersionProperty("VERSION_LONG")
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
